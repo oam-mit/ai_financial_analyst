@@ -1,0 +1,28 @@
+# Common
+.DS_Store
+.env
+*.log
+
+# Backend (Python)
+backend/__pycache__/
+backend/*.py[oc]
+backend/build/
+backend/dist/
+backend/wheels/
+backend/*.egg-info
+backend/.venv/
+backend/db.sqlite3
+backend/sec_filings/
+*.pyc
+
+# Frontend (Node.js)
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.env*
+frontend/*.local
+frontend/npm-debug.log*
+frontend/yarn-debug.log*
+frontend/yarn-error.log*
+frontend/.pnp*
+frontend/.pnp.js

@@ -1,0 +1,213 @@
+from rest_framework import viewsets, status, permissions
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from django.shortcuts import get_object_or_404
+from django.db import models
+from .models import Stock, SECFiling, ChatSession, ChatMessage
+from .serializers import StockSerializer, SECFilingSerializer, ChatSessionSerializer, ChatMessageSerializer, UserSerializer
+from .services import SECService, DCFService, LLMService, read_filing_content
+import os
+import requests
+
+class RegisterView(APIView):
+    permission_classes = [permissions.AllowAny]
+    def post(self, request):
+        serializer = UserSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class StockViewSet(viewsets.ModelViewSet):
+    queryset = Stock.objects.all()
+    serializer_class = StockSerializer
+    lookup_field = 'symbol'
+
+    @action(detail=True, methods=['post'])
+    def fetch_filings(self, request, symbol=None):
+        stock = self.get_object()
+        sec_service = SECService()
+        filings = sec_service.fetch_last_4_filings(stock)
+        serializer = SECFilingSerializer(filings, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def search(self, request):
+        query = request.query_params.get('q', '')
+        if not query:
+            return Response([])
+
+        # 1. Search local DB
+        local_stocks = Stock.objects.filter(
+            models.Q(symbol__icontains=query) | 
+            models.Q(company_name__icontains=query)
+        )[:10]
+        
+        results = []
+        seen_symbols = set()
+        
+        for s in local_stocks:
+            results.append({'symbol': s.symbol, 'name': s.company_name or s.symbol})
+            seen_symbols.add(s.symbol)
+
+        # 2. Search Yahoo Finance API
+        try:
+            # Using Yahoo Finance suggest API
+            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=10&newsCount=0"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                for quote in data.get('quotes', []):
+                    symbol = quote.get('symbol')
+                    if symbol and symbol not in seen_symbols:
+                        results.append({
+                            'symbol': symbol,
+                            'name': quote.get('longname') or quote.get('shortname') or symbol
+                        })
+                        seen_symbols.add(symbol)
+        except Exception as e:
+            # Log error or silently fail for external API
+            print(f"Yahoo Search Error: {e}")
+
+        return Response(results[:15])
+
+    @action(detail=True, methods=['get'])
+    def price(self, request, symbol=None):
+        import yfinance as yf
+        try:
+            # use 'symbol' because lookup_field = 'symbol'
+            stock = yf.Ticker(symbol)
+            info = stock.info
+            
+            # Try different price keys as yfinance can be inconsistent
+            current_price = info.get('currentPrice') or info.get('regularMarketPrice') or info.get('price')
+            
+            if current_price is None:
+                try:
+                    current_price = stock.fast_info.last_price
+                except:
+                    pass
+            
+            # Get change data
+            change_percent = info.get('regularMarketChangePercent')
+            change_value = info.get('regularMarketChange')
+            
+            # Fallback for change data
+            if change_percent is None and current_price is not None:
+                prev_close = info.get('previousClose') or info.get('regularMarketPreviousClose')
+                if prev_close:
+                    change_value = current_price - prev_close
+                    change_percent = (change_value / prev_close) * 100
+
+            return Response({
+                'symbol': symbol, 
+                'price': current_price,
+                'change': change_value,
+                'change_percent': change_percent
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+from django.http import StreamingHttpResponse
+
+class ChatSessionViewSet(viewsets.ModelViewSet):
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = ChatSessionSerializer
+
+    def get_queryset(self):
+        return ChatSession.objects.filter(user=self.request.user)
+
+    @action(detail=False, methods=['post'])
+    def start_or_get_latest(self, request):
+        symbol = request.data.get('symbol')
+        if not symbol:
+            return Response({"error": "Symbol is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        stock, created = Stock.objects.get_or_create(symbol=symbol.upper())
+        
+        # Check if we have filings
+        if stock.filings.count() == 0:
+            sec_service = SECService()
+            sec_service.fetch_last_4_filings(stock)
+
+        session = ChatSession.objects.filter(user=request.user, stock=stock).order_by('-updated_at').first()
+        
+        if not session:
+            session = ChatSession.objects.create(user=request.user, stock=stock)
+        
+        serializer = self.get_serializer(session)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def analyze(self, request, pk=None):
+        session = self.get_object()
+        stock = session.stock
+        
+        # Get DCF
+        dcf_data = DCFService.calculate_dcf(stock.symbol)
+        
+        # Get Filing Contents
+        filings = stock.filings.all()[:4]
+        filings_data = [read_filing_content(f.content_path) for f in filings]
+        
+        # Get LLM Analysis (Stream)
+        llm_service = LLMService()
+        try:
+            response = llm_service.get_analysis(stock.symbol, filings_data, dcf_data, stream=True)
+            
+            def stream_generator():
+                full_text = ""
+                try:
+                    for chunk in response:
+                        text = chunk.text
+                        full_text += text
+                        yield text
+                    
+                    # Save as message after streaming is complete
+                    ChatMessage.objects.create(
+                        session=session,
+                        role='assistant',
+                        content=full_text,
+                        is_analysis=True
+                    )
+                except Exception as e:
+                    yield f"\n\nError during streaming: {str(e)}"
+            
+            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def send_message(self, request, pk=None):
+        session = self.get_object()
+        user_content = request.data.get('content')
+        if not user_content:
+            return Response({"error": "Content is required"}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Save User Message
+        ChatMessage.objects.create(session=session, role='user', content=user_content)
+        
+        # Get History for LLM
+        messages = session.messages.all().order_by('created_at')
+        history = [{"role": m.role, "content": m.content} for m in messages]
+        
+        # Get LLM Response (Stream)
+        llm_service = LLMService()
+        try:
+            response = llm_service.get_chat_response(history, user_content, stream=True)
+            
+            def stream_generator():
+                full_text = ""
+                for chunk in response:
+                    text = chunk.text
+                    full_text += text
+                    yield text
+                
+                # Save Assistant Message after streaming
+                ChatMessage.objects.create(session=session, role='assistant', content=full_text)
+                
+            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
