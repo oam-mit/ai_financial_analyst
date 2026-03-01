@@ -275,6 +275,80 @@ class LLMService:
         # Legacy method
         pass
 
+    async def get_transcript_answer(self, transcript_text, user_question, pusher_channel=None):
+        """
+        Searches the earnings call transcript for a direct answer to the user's question.
+        If found, returns a snippet object. If not found, returns None.
+        Always fires a Pusher event with the result (or a "not found" signal).
+        """
+        prompt = f"""
+        You are a financial transcript analyst.
+        A user asked the following question about this company:
+        
+        QUESTION: "{user_question}"
+        
+        Search the earnings call transcript below for a direct answer to this question.
+        
+        RULES:
+        - If a clear, relevant answer EXISTS in the transcript, extract it as a snippet.
+        - Include the full context — do not cut off mid-sentence. Add 2-3 seconds buffer to start and end.
+        - Also include a short verbatim quote (1-3 sentences) from the transcript that directly answers the question.
+        - If NO clear answer exists in the transcript, set "found" to false.
+        
+        Return a JSON object with EXACTLY these fields:
+        {{
+          "found": true or false,
+          "start": <start timestamp in seconds, or null>,
+          "end": <end timestamp in seconds, or null>,
+          "label": "<short label like 'Answer: Revenue Guidance'>",
+          "description": "<brief explanation of what the snippet answers and why it's relevant>",
+          "quote": "<verbatim quote from the transcript that answers the question, or null if not found>"
+        }}
+        
+        Return ONLY the raw JSON object. No markdown, no extra text.
+        
+        TRANSCRIPT:
+        {transcript_text[:100000]}
+        """
+
+        result = None
+        try:
+            if self.model_choice == 'mistral' and self.mistral_client:
+                response = await self.mistral_client.chat.complete_async(
+                    model="mistral-large-latest",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                import json
+                text = response.choices[0].message.content.strip()
+                if text.startswith('```json'):
+                    text = text[7:-3].strip()
+                elif text.startswith('```'):
+                    text = text[3:-3].strip()
+                data = json.loads(text)
+                if data.get('found'):
+                    result = data
+            else:
+                import json
+                response = await self.gemini_model.generate_content_async(
+                    prompt,
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                data = json.loads(response.text)
+                if data.get('found'):
+                    result = data
+        except Exception as e:
+            print(f"Transcript answer search error: {e}")
+            result = None
+
+        if pusher_channel:
+            from .pusher_utils import trigger_pusher_event
+            if result:
+                trigger_pusher_event(pusher_channel, 'transcript-snippet', result)
+            else:
+                trigger_pusher_event(pusher_channel, 'transcript-snippet', {"found": False})
+
+        return result
+
     async def get_transcript_highlights(self, transcript_text):
         prompt = f"""
         You are a financial highlights expert.
@@ -383,6 +457,7 @@ class LLMService:
         3. **Future Relevance & Direction**: Is the direction the company is taking good for its future? Will it still be relevant in 5-10 years? What are the big things they are working on?
         4. **The 'Fair Value' Insight**: Explain what the DCF analysis says about the stock's value (intrinsic value: {dcf_data.get('intrinsic_value') if isinstance(dcf_data, dict) else 'N/A'}) compared to its current price. Explain what this means for an investor in simple terms.
         5. **Key Risks & Green Flags**: What should an investor watch out for (Risks), and what are the encouraging signs (Green Flags)?
+        6. **Debt, Economy & Buybacks (Quick Look)**: In 2-3 short bullet points: (a) How much debt does the company carry — is it manageable or a concern? (b) How might the current economic environment (e.g., interest rates, inflation, recession fears) impact the company and its debt? (c) Does the company have a stock buyback program? If so, briefly note whether it signals confidence or is masking weak growth, and any key risks (e.g., buybacks funded by debt).
         
         CRITICAL: Use the numbers provided in the DCF DATA (Revenue, Net Income, R&D, etc.) to ground your analysis, but always translate them into "human" terms (e.g., "They spend $X out of every $100 they make on Y"). DO NOT provide a final 'BUY', 'SELL', or 'HOLD' recommendation. Instead, provide a concluding section called 'Investor's Decision Toolkit' where you summarize the most important points.
         

@@ -265,14 +265,14 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 highlights=highlights
             )
             
-            # Notify frontend that everything is complete - avoid sending massive content in Pusher to prevent "Too much data" error
+            # Notify frontend that everything is complete.
+            # NOTE: Do NOT send 'content' here - the frontend already has the full text
+            # assembled from the streaming 'ai-chunk' events. Sending truncated content
+            # here would overwrite the complete streamed message with a truncated version.
             from .pusher_utils import trigger_pusher_event
-            # Truncate content for Pusher - the frontend should already have it via chunks
-            pusher_content = (full_text[:5000] + "... [truncated]") if len(full_text) > 5000 else full_text
             trigger_pusher_event(pusher_channel, 'ai-complete', {
-                'highlights': highlights, 
-                'is_analysis': True, 
-                'content': pusher_content
+                'highlights': highlights,
+                'is_analysis': True
             })
             
             return {"content": full_text, "highlights": highlights}
@@ -313,14 +313,45 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
             )
             
             from .pusher_utils import trigger_pusher_event
-            # Truncate content for Pusher
-            pusher_content = (full_text[:5000] + "... [truncated]") if len(full_text) > 5000 else full_text
-            trigger_pusher_event(pusher_channel, 'ai-complete', {'content': pusher_content})
+            # NOTE: Do NOT send 'content' here - the frontend already has the full text
+            # assembled from the streaming 'ai-chunk' events. Sending truncated content
+            # would overwrite the complete streamed message with a truncated version.
+            trigger_pusher_event(pusher_channel, 'ai-complete', {})
             
             return full_text
 
         try:
             full_text = async_to_sync(process_message)()
+            
+            # Non-blocking: search the transcript for an answer to the user's question.
+            # Only runs if the stock has a transcript loaded.
+            stock = session.stock
+            if stock.transcript:
+                import threading
+                import asyncio as _asyncio
+                
+                _transcript_text = stock.transcript
+                _question = user_content
+                _channel = pusher_channel
+                _mc = model_choice
+                
+                def _run_transcript_search():
+                    _loop = _asyncio.new_event_loop()
+                    _asyncio.set_event_loop(_loop)
+                    try:
+                        _svc = LLMService(model_choice=_mc)
+                        _loop.run_until_complete(
+                            _svc.get_transcript_answer(_transcript_text, _question, pusher_channel=_channel)
+                        )
+                    except Exception as _e:
+                        print(f"Background transcript answer error: {_e}")
+                    finally:
+                        _loop.close()
+                
+                _t = threading.Thread(target=_run_transcript_search, daemon=True)
+                _t.start()
+            
             return Response({"content": full_text}, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+

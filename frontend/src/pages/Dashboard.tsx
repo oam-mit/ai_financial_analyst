@@ -41,6 +41,16 @@ interface Highlight {
     description: string;
 }
 
+interface TranscriptSnippet {
+    found: boolean;
+    start?: number;
+    end?: number;
+    label?: string;
+    description?: string;
+    quote?: string;
+    question?: string; // We'll tag it with the original question on the frontend
+}
+
 interface Filing {
     id: number;
     filing_type: '10-K' | '10-Q';
@@ -133,6 +143,9 @@ const Dashboard = () => {
     const [activeClip, setActiveClip] = useState<{ start: number, end: number } | null>(null);
     const [isHighlightsOpen, setIsHighlightsOpen] = useState(false);
     const [isHighlightsLoading, setIsHighlightsLoading] = useState(false);
+    const [transcriptSnippets, setTranscriptSnippets] = useState<TranscriptSnippet[]>([]);
+    const [isSnippetSearching, setIsSnippetSearching] = useState(false);
+    const pendingQuestionRef = useRef<string>('');
     const [availableFilings, setAvailableFilings] = useState<Filing[]>([]);
     const [selectedFilingType, setSelectedFilingType] = useState<'10-K' | '10-Q' | ''>('');
     const [selectedFilingId, setSelectedFilingId] = useState<number | null>(null);
@@ -217,6 +230,17 @@ const Dashboard = () => {
                 return m;
             }));
             scrollToBottom();
+        });
+
+        channel.bind('transcript-snippet', (data: TranscriptSnippet) => {
+            console.log("Received transcript snippet:", data);
+            setIsSnippetSearching(false);
+            if (data.found) {
+                // Attach the pending question so we can display it in the card
+                const tagged = { ...data, question: pendingQuestionRef.current };
+                setTranscriptSnippets(prev => [tagged, ...prev]); // newest first
+                setIsHighlightsOpen(true);
+            }
         });
 
         channel.bind('ai-complete', (data: { content: string, highlights?: Highlight[], is_analysis?: boolean }) => {
@@ -389,6 +413,8 @@ const Dashboard = () => {
             } else {
                 setHighlights([]);
             }
+            setTranscriptSnippets([]);
+            setIsSnippetSearching(false);
 
             setCurrentStock(stockSymbol.toUpperCase());
 
@@ -422,6 +448,12 @@ const Dashboard = () => {
         const currentInput = input;
         setInput('');
 
+        // Mark that we are searching the transcript for an answer to this question
+        pendingQuestionRef.current = currentInput;
+        setIsSnippetSearching(true);
+        setIsHighlightsOpen(true); // Auto-open sidebar so user sees the search in progress
+
+
         setIsAwaitingResponse(true);
         scrollToBottom(true);
         try {
@@ -443,6 +475,7 @@ const Dashboard = () => {
             // The assistant message will be handled by Pusher events
         } catch (err) {
             console.error(err);
+            setIsSnippetSearching(false);
         } finally {
             setIsAwaitingResponse(false);
         }
@@ -453,6 +486,8 @@ const Dashboard = () => {
         setIsAnalyzing(true);
         setIsHighlightsLoading(true);
         setHighlights([]); // Reset for new analysis
+        setTranscriptSnippets([]);
+        setIsSnippetSearching(false);
         scrollToBottom(true);
         try {
             const token = localStorage.getItem('access_token');
@@ -787,7 +822,7 @@ const Dashboard = () => {
                 ) : null}
 
                 {/* Highlights Sidebar */}
-                {session && (highlights.length > 0 || isHighlightsLoading) && isHighlightsOpen && (
+                {session && (highlights.length > 0 || transcriptSnippets.length > 0 || isHighlightsLoading || isSnippetSearching) && isHighlightsOpen && (
                     <section className="glass-card animate-fade-in" style={{ width: '380px', display: 'flex', flexDirection: 'column', overflow: 'hidden', borderLeft: '1px solid var(--glass-border)' }}>
                         <div style={{ padding: '1.25rem', borderBottom: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -842,6 +877,59 @@ const Dashboard = () => {
                                     </div>
                                 );
                             })}
+                            {/* Transcript Answer Snippets Section */}
+                            {(transcriptSnippets.length > 0 || isSnippetSearching) && (
+                                <>
+                                    <div style={{ fontSize: '0.7rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '0.25rem 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '0.5rem' }}>
+                                        Transcript Answers
+                                    </div>
+                                    {isSnippetSearching && (
+                                        <div style={{ textAlign: 'center', padding: '0.75rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: '0.5rem', background: 'rgba(139,92,246,0.04)', borderRadius: '0.75rem', border: '1px dashed rgba(139,92,246,0.25)' }}>
+                                            <Loader2 className="animate-spin" size={14} style={{ color: '#a78bfa' }} />
+                                            <span style={{ fontSize: '0.8rem' }}>Searching transcript for an answer...</span>
+                                        </div>
+                                    )}
+                                    {transcriptSnippets.map((s, i) => (
+                                        <div key={i} className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid #8b5cf6', background: 'rgba(139,92,246,0.05)', transition: 'transform 0.2s' }}>
+                                            <div style={{ fontWeight: '700', color: '#a78bfa', marginBottom: '0.4rem', fontSize: '0.9rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                <MessageSquare size={13} />
+                                                {s.label || 'Transcript Answer'}
+                                            </div>
+                                            {s.question && (
+                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: '0.5rem', fontStyle: 'italic' }}>
+                                                    Re: "{s.question}"
+                                                </div>
+                                            )}
+                                            <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '0.75rem', lineHeight: '1.5' }}>{s.description}</p>
+                                            {s.quote && (
+                                                <blockquote style={{ margin: '0 0 0.75rem 0', padding: '0.6rem 0.75rem', background: 'rgba(139,92,246,0.08)', borderLeft: '2px solid #8b5cf6', borderRadius: '0 0.4rem 0.4rem 0', fontSize: '0.8rem', color: 'var(--text-main)', lineHeight: '1.55', fontStyle: 'italic' }}>
+                                                    "{s.quote}"
+                                                </blockquote>
+                                            )}
+                                            {s.start != null && s.end != null && (
+                                                <button
+                                                    className="btn-primary"
+                                                    style={{ width: '100%', fontSize: '0.8rem', padding: '0.6rem', background: 'rgba(139,92,246,0.1)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}
+                                                    onClick={() => playAudioClip(s.start!, s.end!)}
+                                                >
+                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                                                        <Play size={14} />
+                                                        Listen ({Math.round((s.end! - s.start!))}s)
+                                                    </div>
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </>
+                            )}
+
+                            {/* Divider between snippets and highlights if both present */}
+                            {transcriptSnippets.length > 0 && highlights.length > 0 && (
+                                <div style={{ fontSize: '0.7rem', fontWeight: '700', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', padding: '0.25rem 0', borderBottom: '1px solid var(--glass-border)', marginBottom: '0.5rem' }}>
+                                    Key Highlights
+                                </div>
+                            )}
+
                             {isHighlightsLoading && (
                                 <div style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
                                     <Loader2 className="animate-spin" size={16} />
