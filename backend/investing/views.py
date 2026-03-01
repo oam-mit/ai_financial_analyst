@@ -41,17 +41,17 @@ class StockViewSet(viewsets.ModelViewSet):
         if not query:
             return Response([])
 
-        # 1. Search local DB
+        # 1. Search local DB - only show stocks that have been "verified" with a company name
         local_stocks = Stock.objects.filter(
             models.Q(symbol__icontains=query) | 
             models.Q(company_name__icontains=query)
-        )[:10]
+        ).exclude(company_name__isnull=True).exclude(company_name='')[:10]
         
         results = []
         seen_symbols = set()
         
         for s in local_stocks:
-            results.append({'symbol': s.symbol, 'name': s.company_name or s.symbol})
+            results.append({'symbol': s.symbol, 'name': s.company_name})
             seen_symbols.add(s.symbol)
 
         # 2. Search Yahoo Finance API
@@ -63,11 +63,16 @@ class StockViewSet(viewsets.ModelViewSet):
             if response.status_code == 200:
                 data = response.json()
                 for quote in data.get('quotes', []):
+                    # Filter for only equity/stocks to avoid polluting with indices or options
+                    if quote.get('quoteType') != 'EQUITY':
+                        continue
+                        
                     symbol = quote.get('symbol')
                     if symbol and symbol not in seen_symbols:
+                        name = quote.get('longname') or quote.get('shortname') or symbol
                         results.append({
                             'symbol': symbol,
-                            'name': quote.get('longname') or quote.get('shortname') or symbol
+                            'name': name
                         })
                         seen_symbols.add(symbol)
         except Exception as e:
@@ -119,16 +124,26 @@ class StockViewSet(viewsets.ModelViewSet):
         end = float(request.query_params.get('end', 10))
         
         # Search for the audio file in possible locations
+        base_audio_dir = os.path.join(settings.BASE_DIR, "audio_files", symbol.upper())
+        
         possible_paths = [
-            os.path.join(settings.BASE_DIR, "audio_files", symbol.upper(), "testing_call.mp3"),
+            os.path.join(base_audio_dir, "testing_call.mp3"),
             os.path.join(settings.BASE_DIR, "testing_call.mp3"),
         ]
         
+        # 1. Try explicit paths
         audio_path = None
         for path in possible_paths:
             if os.path.exists(path):
                 audio_path = path
                 break
+        
+        # 2. Try to find ANY mp3 in the company's audio directory if still not found
+        if not audio_path and os.path.exists(base_audio_dir):
+            import glob
+            mp3_files = glob.glob(os.path.join(base_audio_dir, "*.mp3"))
+            if mp3_files:
+                audio_path = mp3_files[0]
                 
         if not audio_path:
             return Response({"error": f"Audio file not found for {symbol}"}, status=status.HTTP_404_NOT_FOUND)
@@ -177,6 +192,24 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
             return Response({"error": "Symbol is required"}, status=status.HTTP_400_BAD_REQUEST)
         
         stock, created = Stock.objects.get_or_create(symbol=symbol.upper())
+        
+        # If new or missing company name, try to fetch it to "verify" the stock
+        if created or not stock.company_name:
+            import yfinance as yf
+            try:
+                ticker_obj = yf.Ticker(stock.symbol)
+                # This call usually fetches a lot of info, we just need the name
+                info = ticker_obj.info
+                name = info.get('longName') or info.get('shortName')
+                if name:
+                    stock.company_name = name
+                    stock.save()
+            except Exception as e:
+                print(f"Error fetching company name for {stock.symbol}: {e}")
+                # If we couldn't even find it, maybe delete it so it won't be suggested next time
+                if created:
+                    stock.delete()
+                    return Response({"error": f"Invalid stock symbol: {symbol}"}, status=status.HTTP_400_BAD_REQUEST)
         
         # Check if we have filings
         if stock.filings.count() == 0:

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Send, TrendingUp, BookOpen, LogOut, Loader2, Menu, X, ChevronRight, History, RefreshCw, ArrowUpRight, ArrowDownRight, Music, Play } from 'lucide-react';
+import { Search, Send, TrendingUp, BookOpen, LogOut, Loader2, Menu, X, ChevronRight, History, RefreshCw, ArrowUpRight, ArrowDownRight, Music, Play, AlertCircle, HelpCircle, MessageSquare } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
 import ReactMarkdown from 'react-markdown';
@@ -437,6 +437,7 @@ const Dashboard = () => {
             console.error(err);
         } finally {
             setIsAnalyzing(false);
+            setIsHighlightsLoading(false);
         }
     };
 
@@ -470,7 +471,7 @@ const Dashboard = () => {
                     </div>
                 </div>
 
-                <form onSubmit={handleSearch} style={{ flex: 1, maxWidth: '400px', display: 'flex', gap: '0.5rem', margin: '0 2rem' }}>
+                <form onSubmit={handleSearch} style={{ flex: 1, maxWidth: '600px', display: 'flex', gap: '0.5rem', margin: '0 2rem' }}>
                     <div style={{ position: 'relative', flex: 1 }} ref={suggestionRef}>
                         <Search size={18} style={{ position: 'absolute', left: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
                         <input
@@ -724,22 +725,40 @@ const Dashboard = () => {
                             </button>
                         </div>
                         <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-                            {highlights.map((h, i) => (
-                                <div key={i} className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid var(--primary)', background: 'rgba(0, 200, 5, 0.03)', transition: 'transform 0.2s' }}>
-                                    <div style={{ fontWeight: '700', color: 'var(--primary)', marginBottom: '0.5rem', fontSize: '0.95rem' }}>{h.label}</div>
-                                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: '1.5' }}>{h.description}</p>
-                                    <button
-                                        className="btn-primary"
-                                        style={{ width: '100%', fontSize: '0.8rem', padding: '0.6rem', background: 'rgba(0, 200, 5, 0.1)', color: 'var(--primary)', border: '1px solid rgba(0, 200, 5, 0.2)' }}
-                                        onClick={() => playAudioClip(h.start, h.end)}
-                                    >
-                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
-                                            <Play size={14} />
-                                            Listen ({Math.round(h.end - h.start)}s)
+                            {highlights.map((h, i) => {
+                                const lowerLabel = h.label.toLowerCase();
+                                const isRisk = lowerLabel.includes('risk');
+                                const isEvasive = lowerLabel.includes('evasive') || lowerLabel.includes('incomplete');
+                                const isPressing = lowerLabel.includes('pressing') || lowerLabel.includes('q:');
+
+                                let borderColor = 'var(--primary)';
+                                let bgColor = 'rgba(0, 200, 5, 0.03)';
+                                if (isRisk) { borderColor = 'var(--risk)'; bgColor = 'rgba(239, 68, 68, 0.05)'; }
+                                else if (isEvasive) { borderColor = 'var(--evasive)'; bgColor = 'rgba(250, 204, 21, 0.05)'; }
+                                else if (isPressing) { borderColor = 'var(--pressing)'; bgColor = 'rgba(56, 189, 248, 0.05)'; }
+
+                                return (
+                                    <div key={i} className="glass-card" style={{ padding: '1.25rem', borderLeft: `4px solid ${borderColor}`, background: bgColor, transition: 'transform 0.2s' }}>
+                                        <div style={{ fontWeight: '700', color: borderColor, marginBottom: '0.5rem', fontSize: '0.95rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                            {isRisk && <AlertCircle size={14} />}
+                                            {isEvasive && <HelpCircle size={14} />}
+                                            {isPressing && <MessageSquare size={14} />}
+                                            {h.label}
                                         </div>
-                                    </button>
-                                </div>
-                            ))}
+                                        <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: '1.5' }}>{h.description}</p>
+                                        <button
+                                            className="btn-primary"
+                                            style={{ width: '100%', fontSize: '0.8rem', padding: '0.6rem', background: isRisk ? 'rgba(239, 68, 68, 0.1)' : (isEvasive ? 'rgba(250, 204, 21, 0.1)' : (isPressing ? 'rgba(56, 189, 248, 0.1)' : 'rgba(0, 200, 5, 0.1)')), color: borderColor, border: `1px solid ${borderColor}33` }}
+                                            onClick={() => playAudioClip(h.start, h.end)}
+                                        >
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                                                <Play size={14} />
+                                                Listen ({Math.round(h.end - h.start)}s)
+                                            </div>
+                                        </button>
+                                    </div>
+                                );
+                            })}
                             {isHighlightsLoading && (
                                 <div style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
                                     <Loader2 className="animate-spin" size={16} />

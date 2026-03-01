@@ -8,6 +8,9 @@
   --accent: #00c805;
   --glass: rgba(255, 255, 255, 0.03);
   --glass-border: rgba(255, 255, 255, 0.08);
+  --risk: #ef4444;
+  --evasive: #facc15;
+  --pressing: #38bdf8;
 }
 
 * {

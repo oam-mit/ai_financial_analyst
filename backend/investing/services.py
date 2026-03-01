@@ -7,15 +7,31 @@ from datetime import datetime
 from pathlib import Path
 
 class SECService:
-    def __init__(self, company_name="MyCompany", email="myemail@example.com"):
+    def __init__(self, company_name=None, email=None):
         # SEC requires user agent info
-        self.dl = Downloader(company_name, email, settings.BASE_DIR / "sec_filings")
+        company = company_name or getattr(settings, 'SEC_USER_AGENT_COMPANY', "MyCompany")
+        user_email = email or getattr(settings, 'SEC_USER_AGENT_EMAIL', "myemail@example.com")
+        self.dl = Downloader(company, user_email, settings.BASE_DIR / "sec_filings")
 
     def fetch_last_4_filings(self, stock_obj):
+        import time
         ticker = stock_obj.symbol
         # Fetch 10-K and 10-Q
         for ftype in ["10-K", "10-Q"]:
-            self.dl.get(ftype, ticker, limit=4, download_details=True)
+            retries = 3
+            for attempt in range(retries):
+                try:
+                    self.dl.get(ftype, ticker, limit=4, download_details=True)
+                    time.sleep(1.0) # respect SEC (max 10 rps, but better safe)
+                    break
+                except Exception as e:
+                    if "503" in str(e) and attempt < retries - 1:
+                        wait_time = (attempt + 1) * 2
+                        print(f"SEC 503 error on attempt {attempt+1}. Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                    else:
+                        print(f"Error downloading {ftype} for {ticker}: {e}")
+                        break
         
         # Process downloaded files and save to DB
         filings_dir = settings.BASE_DIR / "sec_filings" / "sec-edgar-filings" / ticker
@@ -252,23 +268,31 @@ class LLMService:
         prompt = f"""
         You are a financial highlights expert.
         Analyze the following earnings call transcript. Specifically find key "Transcript Highlights" that investors should keep in mind.
-        These are moments where:
-        - The company mentions major financial/strategic shifts (overspending, underspending, etc.).
-        - Executives or analysts raise important questions or points about the company's future.
-        - Important highlights that someone might otherwise miss in the text.
         
-        CRITICAL: Each highlight MUST BE SUBSTANTIALLY LONG. Ensure the clip length (end - start) is at least 20 seconds to provide enough context for the listener. If the transcript portion is shorter, expand the start and end by a few seconds to capture the full context of the point being made.
+        CRITICAL: Focus on the following areas and ensure they are represented:
+        1. **Risks Discussed**: Any mention of risks, challenges, or unexpected downsides for the company MUST be included.
+        2. **Pressing Questions**: Find the most intense or pressing questions asked by analysts or participants. These are usually direct, challenging, or focus on critical vulnerabilities.
+        3. **Incomplete or Evasive Answers**: Identify sections where management provides an incomplete answer, bypasses a direct question, or alludes to the question without giving a clear, factual response.
+        4. **Strategic Shifts**: Major financial/strategic shifts (overspending, underspending, pivoting, etc.).
+
+        CRITICAL CLIP COMPLETENESS: 
+        - Each highlight MUST BE FULLY COMPLETE and encompass the entire point being made.
+        - OVER-INFORMATION IS BETTER THAN CUTTING OFF. It is perfectly fine to include more of the clip for completeness and context.
+        - DO NOT start or end in the middle of a sentence.
+        - For "Pressing Questions" or "Evasive Answers", ALWAYS include the full question asked by the analyst AND the full response from management.
+        - IMPORTANT: Subtract 3-5 seconds from the 'start' timestamp and add 3-5 seconds to the 'end' timestamp as a safety buffer to ensure no words are cut off at the beginning or end.
 
         The transcript contains timestamps in the format [start_s - end_s].
         Return a JSON array of highlights. Each highlight should be an object with:
         - start: The starting timestamp (number in seconds).
         - end: The ending timestamp (number in seconds).
-        - label: A short, catchy title for the highlight (e.g., "Strategic R&D Expansion", "CapEx Context").
-        - description: A brief explanation of what is the key takeaway in this clip.
+        - label: A short, catchy title for the highlight (e.g., "Risk: Supply Chain Lag", "Evasive Answer: Margin Pressure", "Pressing Q: Growth Strategy").
+        - description: A brief explanation of the key takeaway in this clip, clearly stating why it was flagged (e.g. if it was an evasive answer or a pressing concern).
 
         Example output:
         [
-          {{"start": 12.5, "end": 45.2, "label": "R&D Spend Concern", "description": "CEO admitted to 20% increase in R&D with no product timeline."}}
+          {{"start": 12.5, "end": 45.2, "label": "R&D Spend Concern (Risk)", "description": "CEO admitted to 20% increase in R&D with no product timeline, flagging a potential overspending risk."}},
+          {{"start": 120.0, "end": 155.0, "label": "Evasive Answer: Profit Margins", "description": "The CFO avoided giving a specific percentage when asked about expected Q4 margins, suggesting internal uncertainty."}}
         ]
         
         Return ONLY the raw JSON array. No markdown, no wrappers.

@@ -146,3 +146,7 @@ PUSHER_KEY = os.getenv('PUSHER_KEY')
 PUSHER_SECRET = os.getenv('PUSHER_SECRET')
 PUSHER_CLUSTER = os.getenv('PUSHER_CLUSTER')
 PUSHER_SSL = True
+
+# SEC User-Agent Configuration
+SEC_USER_AGENT_COMPANY = os.getenv('SEC_USER_AGENT_COMPANY', 'Personal Project')
+SEC_USER_AGENT_EMAIL = os.getenv('SEC_USER_AGENT_EMAIL', 'your-email@example.com')
