@@ -1,0 +1,16 @@
+display_name = "Planner Agent"
+description = "A specialized planning agent with expertise in coding, finance, investing, and economics for financial statement analysis projects."
+safety = "neutral"
+auto_approve = true
+system_prompt_id = "planner"
+
+[completion_args]
+temperature = 0.2
+top_p = 0.9
+max_tokens = 2048
+
+# Enable essential tools for planning and analysis
+enabled_tools = ["read_file", "bash", "grep"]
+
+[tools.bash]
+permission = "always"

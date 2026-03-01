@@ -146,33 +146,85 @@ class DCFService:
         except Exception as e:
             return {"error": str(e)}
 
+import os
 import google.generativeai as genai
+from mistralai import Mistral
 from django.conf import settings
+from asgiref.sync import sync_to_async
+
+import re
+from bs4 import BeautifulSoup
+
+def read_filing_content(path):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+            
+        # Strip out embedded multi-media / dense data files from the raw submission
+        content = re.sub(r'<XML>.*?</XML>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<GRAPHIC>.*?</GRAPHIC>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<EXCEL>.*?</EXCEL>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<PDF>.*?</PDF>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r'<ZIP>.*?</ZIP>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Strip out all HTML
+        soup = BeautifulSoup(content, 'html.parser')
+        text = soup.get_text(separator=' ', strip=True)
+        
+        # Remove base64 or massive dense unbroken strings (like embedded images or XBRL data)
+        text = re.sub(r'\b[a-zA-Z0-9+/=]{100,}\b', '', text)
+        
+        # Optional: squash multiple lines/spaces into single spaces to further reduce token count
+        text = re.sub(r'\s+', ' ', text)
+        
+        # TRUNCATION FIX: Limit to first ~50,000 characters to prevent hitting rate limits (TPM limits)
+        return text.strip()[:50000]
+    except Exception as e:
+        print(f"Error parsing filing: {e}")
+        return ""
 
 class LLMService:
-    def __init__(self, api_key=None):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if self.api_key:
-            genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-flash-latest')
+    def __init__(self, api_key=None, model_choice='mistral'):
+        self.gemini_api_key = api_key or os.getenv("GEMINI_API_KEY")
+        self.mistral_api_key = os.getenv("MISTRAL_API_KEY")
+        self.model_choice = model_choice
+
+        if self.gemini_api_key:
+            genai.configure(api_key=self.gemini_api_key)
+        self.gemini_model = genai.GenerativeModel('gemini-flash-latest')
+
+        if self.mistral_api_key:
+            self.mistral_client = Mistral(api_key=self.mistral_api_key)
+        else:
+            self.mistral_client = None
 
     def get_analysis(self, stock_symbol, filings_data, dcf_data, user_query=None, stream=False):
-        """
-        Generates a financial analysis based on SEC filings and DCF results.
-        filings_data: list of strings (content of filings)
-        """
-        # Limit the content of each filing to stay within token limits (approx 4 chars per token)
-        # 250k tokens limit for free tier. Let's aim for ~150k characters total across all filings.
-        max_chars_per_filing = 40000 
-        truncated_filings = []
-        for content in filings_data:
-            if len(content) > max_chars_per_filing:
-                # Take first 20k and last 20k characters to catch both overview and recent notes
-                truncated_filings.append(content[:20000] + "\n... [TRUNCATED] ...\n" + content[-20000:])
-            else:
-                truncated_filings.append(content)
+        # Legacy method
+        pass
 
-        filings_context = "\n\n".join([f"FILING CONTENT:\n{content}" for content in truncated_filings]) 
+    def get_chat_response(self, history, current_query, stream=False):
+        # Legacy method
+        pass
+
+    async def get_analysis_v2(self, stock_symbol):
+        from .models import Stock
+        # import DCFService safely
+        DCFService_cls = globals().get('DCFService')
+
+        try:
+            stock = await sync_to_async(Stock.objects.get)(symbol=stock_symbol)
+            # Only analyze the most recent SEC filing
+            latest_filing = await sync_to_async(stock.filings.order_by('-accession_number').first)()
+            
+            def get_all_filings_data():
+                return [read_filing_content(latest_filing.content_path)] if latest_filing else []
+                
+            filings_data = await sync_to_async(get_all_filings_data)()
+            dcf_data = await sync_to_async(DCFService_cls.calculate_dcf)(stock_symbol)
+        except Exception as e:
+            return f"Error fetching data for {stock_symbol}: {str(e)}"
+
+        filings_context = "\n\n".join([f"FILING CONTENT:\n{content}" for content in filings_data]) 
         
         prompt = f"""
         You are an expert financial analyst. Analyze the stock {stock_symbol} based on the following SEC filings and DCF analysis.
@@ -183,8 +235,6 @@ class LLMService:
         SEC FILINGS SUMMARY/DATA (TRUNCATED):
         {filings_context}
         
-        USER SPECIFIC QUERY (if any): {user_query or "Provide a general deep dive analysis on the company's financial health and valuation."}
-        
         Please provide a detailed analysis including:
         1. Financial Performance Trends (from SEC).
         2. Risks and Opportunities.
@@ -194,27 +244,57 @@ class LLMService:
         Output format should be clean Markdown.
         """
         
-        try:
-            response = self.model.generate_content(prompt, stream=stream)
-            return response
-        except Exception as e:
-            if "429" in str(e) or "ResourceExhausted" in str(e):
-                raise Exception("Gemini API Quota Exceeded. Please try again in a minute or reduce filing complexity.")
-            raise e
+        if self.model_choice == 'mistral' and self.mistral_client:
+            try:
+                response = await self.mistral_client.chat.complete_async(
+                    model="mistral-medium-latest",
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                text = response.choices[0].message.content.strip()
+                if text.startswith('```markdown'):
+                    text = text[11:]
+                elif text.startswith('```'):
+                    text = text[3:]
+                if text.endswith('```'):
+                    text = text[:-3]
+                return text.strip()
+            except Exception as e:
+                return f"Mistral API Error: {str(e)}"
+        else:
+            try:
+                response = await self.gemini_model.generate_content_async(prompt)
+                return response.text
+            except Exception as e:
+                return f"Gemini API Error: {str(e)}"
 
-    def get_chat_response(self, history, current_query, stream=False):
-        # history: list of dicts with role and content
-        chat = self.model.start_chat(history=[
-            {"role": "user" if m['role'] == 'user' else "model", "parts": [m['content']]} 
-            for m in history[:-1] # Exclude the current query which is about to be sent
-        ])
-        response = chat.send_message(current_query, stream=stream)
-        return response
-
-def read_filing_content(path):
-    try:
-        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-            return f.read()
-    except:
-        return ""
+    async def get_chat_response_v2(self, history, current_query):
+        if self.model_choice == 'mistral' and self.mistral_client:
+            messages = [{"role": h['role'], "content": h['content']} for h in history]
+            messages.append({"role": "user", "content": current_query})
+            try:
+                response = await self.mistral_client.chat.complete_async(
+                    model="mistral-medium-latest",
+                    messages=messages
+                )
+                text = response.choices[0].message.content.strip()
+                if text.startswith('```markdown'):
+                    text = text[11:]
+                elif text.startswith('```'):
+                    text = text[3:]
+                if text.endswith('```'):
+                    text = text[:-3]
+                return text.strip()
+            except Exception as e:
+                return f"Mistral API Error: {str(e)}"
+        else:
+            gemini_history = []
+            for h in history:
+                gemini_history.append({"role": "user" if h['role'] == 'user' else "model", "parts": [h['content']]})
+            
+            try:
+                chat = self.gemini_model.start_chat(history=gemini_history)
+                response = await chat.send_message_async(current_query)
+                return response.text
+            except Exception as e:
+                return f"Gemini API Error: {str(e)}"
 

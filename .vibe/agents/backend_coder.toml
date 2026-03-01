@@ -1,0 +1,19 @@
+display_name = "Senior Backend Django Engineer"
+description = "A specialized backend Django engineer focused on clean, efficient code."
+safety = "neutral"
+auto_approve = true
+system_prompt_id = "django_dev"  # References ~/.vibe/prompts/django_dev.md
+
+[completion_args]
+temperature = 0.2
+top_p = 0.9
+max_tokens = 2048
+
+# Enable essential tools for Django development
+enabled_tools = ["read_file", "write_file", "bash", "grep", "search_replace"]
+
+[tools.bash]
+permission = "always"
+
+[tools.write_file]
+permission = "always"

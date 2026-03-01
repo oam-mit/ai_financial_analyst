@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, Send, TrendingUp, BookOpen, LogOut, Loader2, Menu, X, ChevronRight, History, RefreshCw, ArrowUpRight, ArrowDownRight } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
@@ -12,6 +12,7 @@ interface Message {
     role: 'user' | 'assistant';
     content: string;
     is_analysis?: boolean;
+    isTyping?: boolean;
 }
 
 interface Session {
@@ -31,6 +32,65 @@ interface Price {
     change_percent?: number;
 }
 
+const preprocessContent = (text: string) => {
+    if (!text) return '';
+
+    let processed = text.replace(/\\\$/g, '$');
+    processed = processed.replace(/\$([0-9])/g, '___CUR_TOKEN___$1');
+    processed = processed.replace(/\$\$(.*?)\$\$/gs, '\\[$1\\]');
+    processed = processed.replace(/\$([^\n\$]+?)\$/g, '\\($1\\)');
+    processed = processed.replace(/___CUR_TOKEN___/g, '\\$');
+
+    return processed;
+};
+
+const TypewriterMarkdown = ({ content, isTyping, speed = 5, onTyped, onComplete }: { content: string, isTyping?: boolean, speed?: number, onTyped?: () => void, onComplete?: () => void }) => {
+    const [displayedContent, setDisplayedContent] = useState(isTyping ? '' : content);
+
+    useEffect(() => {
+        if (!isTyping) {
+            setDisplayedContent(content);
+            return;
+        }
+        let i = 0;
+        const timer = setInterval(() => {
+            i += 10; // Yield multi-chunk typing - increased for better performance
+            if (i >= content.length) {
+                setDisplayedContent(content);
+                clearInterval(timer);
+                if (onComplete) onComplete();
+            } else {
+                setDisplayedContent(content.substring(0, i));
+            }
+            if (onTyped) onTyped();
+        }, speed);
+        return () => clearInterval(timer);
+    }, [content, isTyping, speed, onTyped, onComplete]);
+
+    return (
+        <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[[rehypeKatex, { throwOnError: false, strict: false }]]}
+            components={{
+                table: ({ node, ...props }) => (
+                    <div style={{ overflowX: 'auto', margin: '2rem 0', borderRadius: '1rem', border: '1px solid var(--glass-border)', background: 'rgba(0,0,0,0.2)', padding: '0.5rem' }}>
+                        <table className="markdown-table" style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9rem' }} {...props} />
+                    </div>
+                ),
+                thead: ({ node, ...props }) => <thead {...props} style={{ background: 'rgba(0, 200, 5, 0.1)' }} />,
+                th: ({ node, ...props }) => <th {...props} style={{ borderBottom: '2px solid var(--glass-border)', padding: '16px 32px', fontWeight: '700', color: 'var(--primary)', textAlign: 'left' }} />,
+                td: ({ node, ...props }) => <td {...props} style={{ borderBottom: '1px solid var(--glass-border)', padding: '14px 32px', color: 'var(--text-main)' }} />,
+                p: ({ node, ...props }) => <p style={{ marginBottom: '1rem' }} {...props} />,
+                ul: ({ node, ...props }) => <ul style={{ paddingLeft: '1.5rem', marginBottom: '1.5rem', listStyleType: 'disc' }} {...props} />,
+                ol: ({ node, ...props }) => <ol style={{ paddingLeft: '1.5rem', marginBottom: '1.5rem', listStyleType: 'decimal' }} {...props} />,
+                li: ({ node, ...props }) => <li style={{ marginBottom: '0.5rem', paddingLeft: '0.25rem' }} {...props} />
+            }}
+        >
+            {preprocessContent(displayedContent)}
+        </ReactMarkdown>
+    );
+};
+
 const Dashboard = () => {
     const { user, logout } = useAuth();
     const [symbol, setSymbol] = useState('');
@@ -39,6 +99,7 @@ const Dashboard = () => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [isAwaitingResponse, setIsAwaitingResponse] = useState(false);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
     const [isFetchingSuggestions, setIsFetchingSuggestions] = useState(false);
@@ -48,16 +109,21 @@ const Dashboard = () => {
     const [isLoadingHistory, setIsLoadingHistory] = useState(false);
     const [currentPrice, setCurrentPrice] = useState<Price | null>(null);
     const [isRefreshingPrice, setIsRefreshingPrice] = useState(false);
+    const [modelChoice, setModelChoice] = useState<'mistral' | 'gemini'>('mistral');
     const chatEndRef = useRef<HTMLDivElement>(null);
     const suggestionRef = useRef<HTMLDivElement>(null);
 
-    const scrollToBottom = () => {
+    const scrollToBottom = useCallback(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    };
+    }, []);
+
+    const handleTypingComplete = useCallback((index: number) => {
+        setMessages(prev => prev.map((m, i) => i === index ? { ...m, isTyping: false } : m));
+    }, []);
 
     useEffect(() => {
         scrollToBottom();
-    }, [messages]);
+    }, [messages, isAwaitingResponse, isAnalyzing]); // Scroll on new messages or loading state
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -183,6 +249,7 @@ const Dashboard = () => {
         const currentInput = input;
         setInput('');
 
+        setIsAwaitingResponse(true);
         try {
             const token = localStorage.getItem('access_token');
             const response = await fetch(`http://localhost:8000/api/chats/${session.id}/send_message/`, {
@@ -191,33 +258,18 @@ const Dashboard = () => {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ content: currentInput })
+                body: JSON.stringify({ content: currentInput, model_choice: modelChoice })
             });
 
-            if (!response.ok) throw new Error('Stream failed');
-            if (!response.body) throw new Error('No response body');
+            if (!response.ok) throw new Error('Request failed');
+            const data = await response.json();
 
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            const assistantMsg: Message = { role: 'assistant', content: '' };
+            const assistantMsg: Message = { role: 'assistant', content: data.content, isTyping: true };
             setMessages(prev => [...prev, assistantMsg]);
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    return [
-                        ...prev.slice(0, -1),
-                        { ...last, content: last.content + chunk }
-                    ];
-                });
-            }
         } catch (err) {
             console.error(err);
+        } finally {
+            setIsAwaitingResponse(false);
         }
     };
 
@@ -231,31 +283,15 @@ const Dashboard = () => {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
-                }
+                },
+                body: JSON.stringify({ model_choice: modelChoice })
             });
 
-            if (!response.ok) throw new Error('Analysis stream failed');
-            if (!response.body) throw new Error('No response body');
+            if (!response.ok) throw new Error('Analysis request failed');
+            const data = await response.json();
 
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-
-            const assistantMsg: Message = { role: 'assistant', content: '', is_analysis: true };
+            const assistantMsg: Message = { role: 'assistant', content: data.content, is_analysis: true, isTyping: true };
             setMessages(prev => [...prev, assistantMsg]);
-
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                const chunk = decoder.decode(value, { stream: true });
-
-                setMessages(prev => {
-                    const last = prev[prev.length - 1];
-                    return [
-                        ...prev.slice(0, -1),
-                        { ...last, content: last.content + chunk }
-                    ];
-                });
-            }
         } catch (err) {
             console.error(err);
         } finally {
@@ -263,17 +299,7 @@ const Dashboard = () => {
         }
     };
 
-    const preprocessContent = (text: string) => {
-        if (!text) return '';
 
-        let processed = text.replace(/\\\$/g, '$');
-        processed = processed.replace(/\$([0-9])/g, '___CUR_TOKEN___$1');
-        processed = processed.replace(/\$\$(.*?)\$\$/gs, '\\[$1\\]');
-        processed = processed.replace(/\$([^\n\$]+?)\$/g, '\\($1\\)');
-        processed = processed.replace(/___CUR_TOKEN___/g, '\\$');
-
-        return processed;
-    };
 
     return (
         <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -344,6 +370,14 @@ const Dashboard = () => {
                     <button type="submit" className="btn-primary" disabled={isLoading}>
                         {isLoading ? <Loader2 className="animate-spin" size={20} /> : 'Search'}
                     </button>
+                    <select
+                        value={modelChoice}
+                        onChange={(e) => setModelChoice(e.target.value as 'mistral' | 'gemini')}
+                        style={{ padding: '0.5rem', borderRadius: '0.5rem', background: 'var(--bg-card)', color: 'var(--text-main)', border: '1px solid var(--glass-border)' }}
+                    >
+                        <option value="mistral">Mistral (Default)</option>
+                        <option value="gemini">Google Gemini</option>
+                    </select>
                 </form>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -447,33 +481,32 @@ const Dashboard = () => {
                                                 DEEP DIVE REPORT
                                             </div>
                                         )}
-                                        <ReactMarkdown
-                                            remarkPlugins={[remarkGfm, remarkMath]}
-                                            rehypePlugins={[[rehypeKatex, {
-                                                throwOnError: false,
-                                                errorColor: 'inherit',
-                                                strict: false
-                                            }]]}
-                                            components={{
-                                                table: ({ node, ...props }) => (
-                                                    <div style={{ overflowX: 'auto', margin: '2rem 0', borderRadius: '1rem', border: '1px solid var(--glass-border)', background: 'rgba(0,0,0,0.2)', padding: '0.5rem' }}>
-                                                        <table className="markdown-table" style={{ borderCollapse: 'collapse', width: '100%', fontSize: '0.9rem' }} {...props} />
-                                                    </div>
-                                                ),
-                                                thead: ({ node, ...props }) => <thead {...props} style={{ background: 'rgba(0, 200, 5, 0.1)' }} />,
-                                                th: ({ node, ...props }) => <th {...props} style={{ borderBottom: '2px solid var(--glass-border)', padding: '16px 32px', fontWeight: '700', color: 'var(--primary)', textAlign: 'left' }} />,
-                                                td: ({ node, ...props }) => <td {...props} style={{ borderBottom: '1px solid var(--glass-border)', padding: '14px 32px', color: 'var(--text-main)' }} />,
-                                                p: ({ node, ...props }) => <p style={{ marginBottom: '1rem' }} {...props} />,
-                                                ul: ({ node, ...props }) => <ul style={{ paddingLeft: '1.5rem', marginBottom: '1.5rem', listStyleType: 'disc' }} {...props} />,
-                                                ol: ({ node, ...props }) => <ol style={{ paddingLeft: '1.5rem', marginBottom: '1.5rem', listStyleType: 'decimal' }} {...props} />,
-                                                li: ({ node, ...props }) => <li style={{ marginBottom: '0.5rem', paddingLeft: '0.25rem' }} {...props} />
-                                            }}
-                                        >
-                                            {preprocessContent(m.content)}
-                                        </ReactMarkdown>
+                                        <TypewriterMarkdown
+                                            content={m.content}
+                                            isTyping={m.isTyping}
+                                            speed={m.is_analysis ? 2 : 10}
+                                            onTyped={scrollToBottom}
+                                            onComplete={() => handleTypingComplete(i)}
+                                        />
                                     </div>
                                 </div>
                             ))}
+                            {(isAwaitingResponse || isAnalyzing) && (
+                                <div style={{
+                                    alignSelf: 'flex-start',
+                                    padding: '1rem 1.75rem',
+                                    borderRadius: '1.25rem',
+                                    border: '1px solid var(--glass-border)',
+                                    background: 'rgba(255,255,255,0.03)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.75rem',
+                                    color: 'var(--text-muted)'
+                                }}>
+                                    <Loader2 size={16} className="animate-spin" color="var(--primary)" />
+                                    <span style={{ fontSize: '0.9rem' }}>{isAnalyzing ? 'Conducting Deep Dive Analysis...' : 'Model is thinking...'}</span>
+                                </div>
+                            )}
                             <div ref={chatEndRef} />
                         </div>
 
@@ -490,6 +523,25 @@ const Dashboard = () => {
                             </button>
                         </form>
                     </section>
+                ) : isLoading ? (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+                        <div className="glass-card animate-fade-in" style={{
+                            padding: '3rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            gap: '1.5rem',
+                            background: 'var(--bg-card)',
+                            boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+                            textAlign: 'center'
+                        }}>
+                            <Loader2 className="animate-spin" size={48} color="var(--primary)" />
+                            <div>
+                                <h2 style={{ fontSize: '1.5rem', color: 'var(--text-main)', marginBottom: '0.5rem' }}>Initializing Analysis</h2>
+                                <p style={{ color: 'var(--text-muted)' }}>Fetching SEC filings and market data for {symbol}...</p>
+                            </div>
+                        </div>
+                    </div>
                 ) : (
                     /* Hero Banner */
                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>

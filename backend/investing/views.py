@@ -4,9 +4,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
 from django.db import models
+from asgiref.sync import async_to_sync, sync_to_async
 from .models import Stock, SECFiling, ChatSession, ChatMessage
 from .serializers import StockSerializer, SECFilingSerializer, ChatSessionSerializer, ChatMessageSerializer, UserSerializer
 from .services import SECService, DCFService, LLMService, read_filing_content
+from django.http import HttpResponse, StreamingHttpResponse
 import os
 import requests
 
@@ -145,39 +147,25 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         session = self.get_object()
         stock = session.stock
         
-        # Get DCF
-        dcf_data = DCFService.calculate_dcf(stock.symbol)
+        model_choice = request.data.get('model_choice', 'mistral')
+        llm_service = LLMService(model_choice=model_choice)
         
-        # Get Filing Contents
-        filings = stock.filings.all()[:4]
-        filings_data = [read_filing_content(f.content_path) for f in filings]
-        
-        # Get LLM Analysis (Stream)
-        llm_service = LLMService()
+        async def process_analysis():
+            full_text = await llm_service.get_analysis_v2(stock.symbol)
+            # Save as message after complete
+            await sync_to_async(ChatMessage.objects.create)(
+                session=session,
+                role='assistant',
+                content=full_text,
+                is_analysis=True
+            )
+            return full_text
+
         try:
-            response = llm_service.get_analysis(stock.symbol, filings_data, dcf_data, stream=True)
-            
-            def stream_generator():
-                full_text = ""
-                try:
-                    for chunk in response:
-                        text = chunk.text
-                        full_text += text
-                        yield text
-                    
-                    # Save as message after streaming is complete
-                    ChatMessage.objects.create(
-                        session=session,
-                        role='assistant',
-                        content=full_text,
-                        is_analysis=True
-                    )
-                except Exception as e:
-                    yield f"\n\nError during streaming: {str(e)}"
-            
-            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
+            full_text = async_to_sync(process_analysis)()
+            return Response({"content": full_text}, status=status.HTTP_200_OK)
         except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'])
     def send_message(self, request, pk=None):
@@ -193,21 +181,21 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         messages = session.messages.all().order_by('created_at')
         history = [{"role": m.role, "content": m.content} for m in messages]
         
-        # Get LLM Response (Stream)
-        llm_service = LLMService()
+        # Use MCP-powered LLM Service
+        model_choice = request.data.get('model_choice', 'mistral')
+        llm_service = LLMService(model_choice=model_choice)
+        
+        async def process_message():
+            full_text = await llm_service.get_chat_response_v2(history, user_content)
+            await sync_to_async(ChatMessage.objects.create)(
+                session=session, 
+                role='assistant', 
+                content=full_text
+            )
+            return full_text
+
         try:
-            response = llm_service.get_chat_response(history, user_content, stream=True)
-            
-            def stream_generator():
-                full_text = ""
-                for chunk in response:
-                    text = chunk.text
-                    full_text += text
-                    yield text
-                
-                # Save Assistant Message after streaming
-                ChatMessage.objects.create(session=session, role='assistant', content=full_text)
-                
-            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
+            full_text = async_to_sync(process_message)()
+            return Response({"content": full_text}, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

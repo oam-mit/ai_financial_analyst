@@ -1,0 +1,19 @@
+display_name = "PRD Converter Agent"
+description = "Converts PRD documents from planner agent into parallelizable task JSON format"
+safety = "neutral"
+auto_approve = true
+system_prompt_id = "prd_converter"
+
+[completion_args]
+temperature = 0.1
+top_p = 0.9
+max_tokens = 1024
+
+# Enable essential tools for file operations
+enabled_tools = ["read_file", "write_file", "bash", "grep"]
+
+[tools.bash]
+permission = "always"
+
+[tools.write_file]
+permission = "always"

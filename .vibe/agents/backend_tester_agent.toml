@@ -1,0 +1,19 @@
+display_name = "Backend Tester Agent"
+description = "A specialized agent for writing unit tests for Django applications and reporting bugs."
+safety = "neutral"
+auto_approve = true
+system_prompt_id = "backend_tester"
+
+[completion_args]
+temperature = 0.2
+top_p = 0.9
+max_tokens = 2048
+
+# Enable essential tools for Django testing
+enabled_tools = ["read_file", "write_file", "bash", "grep"]
+
+[tools.bash]
+permission = "always"
+
+[tools.write_file]
+permission = "always"

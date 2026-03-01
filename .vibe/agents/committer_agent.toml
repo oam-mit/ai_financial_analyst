@@ -1,0 +1,19 @@
+display_name = "Committer Agent"
+description = "A specialized agent for analyzing code changes and creating conventional commit messages with detailed diff analysis."
+safety = "neutral"
+auto_approve = true
+system_prompt_id = "committer"
+
+[completion_args]
+temperature = 0.2
+top_p = 0.9
+max_tokens = 2048
+
+# Enable essential tools for commit analysis
+enabled_tools = ["read_file", "write_file", "bash", "grep"]
+
+[tools.bash]
+permission = "always"
+
+[tools.write_file]
+permission = "always"
