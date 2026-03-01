@@ -307,8 +307,9 @@ class LLMService:
                 print(f"Gemini Error: {e}")
                 return []
 
-    async def get_analysis_v2(self, stock_symbol):
+    async def get_analysis_v2(self, stock_symbol, pusher_channel=None):
         from .models import Stock
+        from .pusher_utils import trigger_pusher_event
         # import DCFService safely
         DCFService_cls = globals().get('DCFService')
 
@@ -350,50 +351,69 @@ class LLMService:
         Output format should be clean Markdown.
         """
         
+        full_text = ""
         if self.model_choice == 'mistral' and self.mistral_client:
             try:
-                response = await self.mistral_client.chat.complete_async(
+                stream = await self.mistral_client.chat.stream_async(
                     model="mistral-medium-latest",
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt}
                     ]
                 )
-                text = response.choices[0].message.content.strip()
-                if text.startswith('```markdown'):
-                    text = text[11:]
-                elif text.startswith('```'):
-                    text = text[3:]
-                if text.endswith('```'):
-                    text = text[:-3]
+                async for chunk in stream:
+                    content = chunk.data.choices[0].delta.content
+                    if content:
+                        full_text += content
+                        if pusher_channel:
+                            trigger_pusher_event(pusher_channel, 'ai-chunk', {'content': content})
+                
+                # Final cleanup for markdown blocks if any
+                text = full_text.strip()
+                if text.startswith('```markdown'): text = text[11:]
+                elif text.startswith('```'): text = text[3:]
+                if text.endswith('```'): text = text[:-3]
                 return text.strip()
             except Exception as e:
                 return f"Mistral API Error: {str(e)}"
         else:
             try:
-                response = await self.gemini_model.generate_content_async(prompt)
-                return response.text
+                response = await self.gemini_model.generate_content_async(prompt, stream=bool(pusher_channel))
+                if pusher_channel:
+                    async for chunk in response:
+                        content = chunk.text
+                        full_text += content
+                        trigger_pusher_event(pusher_channel, 'ai-chunk', {'content': content})
+                    return full_text
+                else:
+                    return response.text
             except Exception as e:
                 return f"Gemini API Error: {str(e)}"
 
-    async def get_chat_response_v2(self, history, current_query):
+    async def get_chat_response_v2(self, history, current_query, pusher_channel=None):
+        from .pusher_utils import trigger_pusher_event
+        full_text = ""
         if self.model_choice == 'mistral' and self.mistral_client:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             for h in history:
                 messages.append({"role": h['role'], "content": h['content']})
             messages.append({"role": "user", "content": current_query})
             try:
-                response = await self.mistral_client.chat.complete_async(
+                stream = await self.mistral_client.chat.stream_async(
                     model="mistral-medium-latest",
                     messages=messages
                 )
-                text = response.choices[0].message.content.strip()
-                if text.startswith('```markdown'):
-                    text = text[11:]
-                elif text.startswith('```'):
-                    text = text[3:]
-                if text.endswith('```'):
-                    text = text[:-3]
+                async for chunk in stream:
+                    content = chunk.data.choices[0].delta.content
+                    if content:
+                        full_text += content
+                        if pusher_channel:
+                            trigger_pusher_event(pusher_channel, 'ai-chunk', {'content': content})
+                
+                text = full_text.strip()
+                if text.startswith('```markdown'): text = text[11:]
+                elif text.startswith('```'): text = text[3:]
+                if text.endswith('```'): text = text[:-3]
                 return text.strip()
             except Exception as e:
                 return f"Mistral API Error: {str(e)}"
@@ -404,8 +424,15 @@ class LLMService:
             
             try:
                 chat = self.gemini_model.start_chat(history=gemini_history)
-                response = await chat.send_message_async(current_query)
-                return response.text
+                response = await chat.send_message_async(current_query, stream=bool(pusher_channel))
+                if pusher_channel:
+                    async for chunk in response:
+                        content = chunk.text
+                        full_text += content
+                        trigger_pusher_event(pusher_channel, 'ai-chunk', {'content': content})
+                    return full_text
+                else:
+                    return response.text
             except Exception as e:
                 return f"Gemini API Error: {str(e)}"
 

@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
+import Pusher from 'pusher-js';
 
 interface Message {
     role: 'user' | 'assistant';
@@ -54,26 +55,28 @@ const preprocessContent = (text: string) => {
 
 const TypewriterMarkdown = ({ content, isTyping, speed = 5, onTyped, onComplete }: { content: string, isTyping?: boolean, speed?: number, onTyped?: () => void, onComplete?: () => void }) => {
     const [displayedContent, setDisplayedContent] = useState(isTyping ? '' : content);
+    const lastContentRef = useRef(content);
+
+    const prevIsTyping = useRef(isTyping);
 
     useEffect(() => {
         if (!isTyping) {
             setDisplayedContent(content);
+            lastContentRef.current = content;
             return;
         }
-        let i = 0;
-        const timer = setInterval(() => {
-            i += 10; // Yield multi-chunk typing - increased for better performance
-            if (i >= content.length) {
-                setDisplayedContent(content);
-                clearInterval(timer);
-                if (onComplete) onComplete();
-            } else {
-                setDisplayedContent(content.substring(0, i));
-            }
-            if (onTyped) onTyped();
-        }, speed);
-        return () => clearInterval(timer);
-    }, [content, isTyping, speed, onTyped, onComplete]);
+
+        setDisplayedContent(content);
+        if (onTyped) onTyped();
+
+    }, [content, isTyping, onTyped]);
+
+    useEffect(() => {
+        if (prevIsTyping.current && !isTyping && onComplete) {
+            onComplete();
+        }
+        prevIsTyping.current = isTyping;
+    }, [isTyping, onComplete]);
 
     return (
         <ReactMarkdown
@@ -122,12 +125,23 @@ const Dashboard = () => {
     const [activeAudio, setActiveAudio] = useState<string | null>(null);
     const [activeClip, setActiveClip] = useState<{ start: number, end: number } | null>(null);
     const [isHighlightsOpen, setIsHighlightsOpen] = useState(false);
+    const [isHighlightsLoading, setIsHighlightsLoading] = useState(false);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const suggestionRef = useRef<HTMLDivElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
 
-    const scrollToBottom = useCallback(() => {
-        chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const scrollToBottom = useCallback((force = false) => {
+        if (!chatEndRef.current) return;
+
+        const container = chatEndRef.current.parentElement;
+        if (!container) return;
+
+        // Only scroll if already near bottom (within 150px) or if forced (like sending a new message)
+        const isNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 150;
+
+        if (isNearBottom || force) {
+            chatEndRef.current.scrollIntoView({ behavior: "smooth" });
+        }
     }, []);
 
     const handleTypingComplete = useCallback((index: number) => {
@@ -137,6 +151,109 @@ const Dashboard = () => {
     useEffect(() => {
         scrollToBottom();
     }, [messages, isAwaitingResponse, isAnalyzing]); // Scroll on new messages or loading state
+
+    // Pusher Integration
+    useEffect(() => {
+        if (!session) return;
+
+        console.log("Initializing Pusher for session:", session.id);
+        console.log("Pusher Key:", import.meta.env.VITE_PUSHER_KEY);
+        console.log("Pusher Cluster:", import.meta.env.VITE_PUSHER_CLUSTER);
+
+        const pusher = new Pusher(import.meta.env.VITE_PUSHER_KEY, {
+            cluster: import.meta.env.VITE_PUSHER_CLUSTER,
+            forceTLS: true
+        });
+
+        pusher.connection.bind('state_change', (states: any) => {
+            console.log("Pusher Connection State:", states.current);
+        });
+
+        const channel = pusher.subscribe(`chat_${session.id}`);
+        console.log("Subscribing to channel:", `chat_${session.id}`);
+
+        channel.bind('ai-chunk', (data: { content: string }) => {
+            console.log("Received AI chunk:", data.content);
+            setMessages(prev => {
+                const newMessages = [...prev];
+                const lastMsg = newMessages[newMessages.length - 1];
+
+                if (lastMsg && lastMsg.role === 'assistant' && lastMsg.isTyping) {
+                    // Update existing streaming message
+                    return prev.map((m, i) => i === prev.length - 1 ? { ...m, content: m.content + data.content } : m);
+                } else {
+                    // Start a new assistant message
+                    return [...prev, {
+                        role: 'assistant',
+                        content: data.content,
+                        isTyping: true,
+                        is_analysis: isAnalyzing // Set current state
+                    }];
+                }
+            });
+            scrollToBottom();
+        });
+
+        channel.bind('ai-highlight', (data: Highlight) => {
+            console.log("Received AI highlight snippet:", data);
+            setHighlights(prev => [...prev, data]);
+            setIsHighlightsOpen(true);
+            // Also update the analysis message highlights if it exists
+            setMessages(prev => prev.map(m => {
+                if (m.is_analysis && m.isTyping) {
+                    const newHighlights = [...(m.highlights || []), data];
+                    return { ...m, highlights: newHighlights };
+                }
+                return m;
+            }));
+            scrollToBottom();
+        });
+
+        channel.bind('ai-complete', (data: { content: string, highlights?: Highlight[], is_analysis?: boolean }) => {
+            console.log("Received AI complete:", data);
+            setMessages(prev => {
+                const lastIdx = prev.length - 1;
+                if (lastIdx < 0) return prev;
+                const lastMsg = prev[lastIdx];
+
+                if (lastMsg.role === 'assistant') {
+                    return prev.map((m, i) => i === lastIdx ? {
+                        ...m,
+                        isTyping: false,
+                        content: data.content || m.content,
+                        highlights: data.highlights || m.highlights,
+                        is_analysis: data.is_analysis !== undefined ? data.is_analysis : m.is_analysis
+                    } : m);
+                } else if (lastMsg.role === 'user' && data.content) {
+                    return [...prev, {
+                        role: 'assistant',
+                        content: data.content,
+                        isTyping: false,
+                        highlights: data.highlights,
+                        is_analysis: data.is_analysis
+                    }];
+                }
+                return prev;
+            });
+
+            if (data.highlights && data.highlights.length > 0) {
+                setHighlights(data.highlights);
+                // Don't auto-open if we already streamed some, or maybe do
+                setIsHighlightsOpen(true);
+            }
+
+            setIsAwaitingResponse(false);
+            setIsAnalyzing(false);
+            setIsHighlightsLoading(false);
+            scrollToBottom();
+        });
+
+        return () => {
+            console.log("Unsubscribing from channel:", `chat_${session.id}`);
+            pusher.unsubscribe(`chat_${session.id}`);
+            pusher.disconnect();
+        };
+    }, [session, scrollToBottom]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -248,7 +365,10 @@ const Dashboard = () => {
             }
 
             setCurrentStock(stockSymbol.toUpperCase());
-            // fetchPrice is now handled by useEffect on currentStock
+            // Force scroll to bottom after messages load
+            setTimeout(() => {
+                scrollToBottom(true);
+            }, 100);
         } catch (err) {
             console.error(err);
         } finally {
@@ -273,6 +393,7 @@ const Dashboard = () => {
         setInput('');
 
         setIsAwaitingResponse(true);
+        scrollToBottom(true);
         try {
             const token = localStorage.getItem('access_token');
             const response = await fetch(`http://localhost:8000/api/chats/${session.id}/send_message/`, {
@@ -285,10 +406,7 @@ const Dashboard = () => {
             });
 
             if (!response.ok) throw new Error('Request failed');
-            const data = await response.json();
-
-            const assistantMsg: Message = { role: 'assistant', content: data.content, isTyping: true };
-            setMessages(prev => [...prev, assistantMsg]);
+            // The assistant message will be handled by Pusher events
         } catch (err) {
             console.error(err);
         } finally {
@@ -299,6 +417,9 @@ const Dashboard = () => {
     const handleAnalyze = async () => {
         if (!session) return;
         setIsAnalyzing(true);
+        setIsHighlightsLoading(true);
+        setHighlights([]); // Reset for new analysis
+        scrollToBottom(true);
         try {
             const token = localStorage.getItem('access_token');
             const response = await fetch(`http://localhost:8000/api/chats/${session.id}/analyze/`, {
@@ -311,21 +432,7 @@ const Dashboard = () => {
             });
 
             if (!response.ok) throw new Error('Analysis request failed');
-            const data = await response.json();
-
-            if (data.highlights) {
-                setHighlights(data.highlights);
-                setIsHighlightsOpen(true); // Open highlights panel automatically on new analysis
-            }
-
-            const assistantMsg: Message = {
-                role: 'assistant',
-                content: data.content,
-                is_analysis: true,
-                isTyping: true,
-                highlights: data.highlights
-            };
-            setMessages(prev => [...prev, assistantMsg]);
+            // The assistant message and highlights will be handled by Pusher events
         } catch (err) {
             console.error(err);
         } finally {
@@ -534,7 +641,7 @@ const Dashboard = () => {
                                             onTyped={scrollToBottom}
                                             onComplete={() => handleTypingComplete(i)}
                                         />
-                                        {m.is_analysis && m.highlights && m.highlights.length > 0 && !m.isTyping && (
+                                        {m.is_analysis && m.highlights && m.highlights.length > 0 && (
                                             <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-start' }}>
                                                 <button
                                                     onClick={() => {
@@ -596,7 +703,7 @@ const Dashboard = () => {
                 ) : null}
 
                 {/* Highlights Sidebar */}
-                {session && highlights.length > 0 && isHighlightsOpen && (
+                {session && (highlights.length > 0 || isHighlightsLoading) && isHighlightsOpen && (
                     <section className="glass-card animate-fade-in" style={{ width: '380px', display: 'flex', flexDirection: 'column', overflow: 'hidden', borderLeft: '1px solid var(--glass-border)' }}>
                         <div style={{ padding: '1.25rem', borderBottom: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
@@ -633,6 +740,12 @@ const Dashboard = () => {
                                     </button>
                                 </div>
                             ))}
+                            {isHighlightsLoading && (
+                                <div style={{ textAlign: 'center', padding: '1rem', color: 'var(--text-muted)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                                    <Loader2 className="animate-spin" size={16} />
+                                    <span style={{ fontSize: '0.85rem' }}>Analyzing highlights...</span>
+                                </div>
+                            )}
                         </div>
                         {activeAudio && (
                             <div style={{ padding: '1rem', borderTop: '1px solid var(--glass-border)' }}>

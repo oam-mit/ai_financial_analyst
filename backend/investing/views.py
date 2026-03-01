@@ -197,16 +197,21 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         stock = session.stock
         model_choice = request.data.get('model_choice', 'mistral')
         llm_service = LLMService(model_choice=model_choice)
+        pusher_channel = f"chat_{session.id}"
         
         async def process_analysis():
-            # 1. Main analysis
-            full_text = await llm_service.get_analysis_v2(stock.symbol)
+            # 1. Main analysis (with streaming to Pusher)
+            full_text = await llm_service.get_analysis_v2(stock.symbol, pusher_channel=pusher_channel)
             
             # 2. Get highlights from transcript (fetch from DB)
             highlights = []
             if stock.transcript:
                 try:
+                    from .pusher_utils import trigger_pusher_event
                     highlights = await llm_service.get_transcript_highlights(stock.transcript)
+                    # Stream highlights individually
+                    for h in highlights:
+                        trigger_pusher_event(pusher_channel, 'ai-highlight', h)
                 except Exception as e:
                     print(f"Error processing transcript: {e}")
 
@@ -218,6 +223,15 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 is_analysis=True,
                 highlights=highlights
             )
+            
+            # Notify frontend that everything is complete
+            from .pusher_utils import trigger_pusher_event
+            trigger_pusher_event(pusher_channel, 'ai-complete', {
+                'highlights': highlights, 
+                'is_analysis': True, 
+                'content': full_text
+            })
+            
             return {"content": full_text, "highlights": highlights}
 
         try:
@@ -243,14 +257,19 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         # Use MCP-powered LLM Service
         model_choice = request.data.get('model_choice', 'mistral')
         llm_service = LLMService(model_choice=model_choice)
+        pusher_channel = f"chat_{session.id}"
         
         async def process_message():
-            full_text = await llm_service.get_chat_response_v2(history, user_content)
+            full_text = await llm_service.get_chat_response_v2(history, user_content, pusher_channel=pusher_channel)
             await sync_to_async(ChatMessage.objects.create)(
                 session=session, 
                 role='assistant', 
                 content=full_text
             )
+            
+            from .pusher_utils import trigger_pusher_event
+            trigger_pusher_event(pusher_channel, 'ai-complete', {'content': full_text})
+            
             return full_text
 
         try:
