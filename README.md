@@ -21,6 +21,7 @@ Financial AI is a comprehensive investment research platform that combines real-
 - **Earnings Call Analysis**: Transcript processing with risk highlighting
 - **Real-time Chat Interface**: Ask questions about specific companies
 - **Audio Clip Extraction**: Listen to key moments from earnings calls
+- **Speech Synthesis**: ElevenLabs-powered audio generation for analysis summaries
 
 ## 🔧 Technology Stack
 
@@ -33,10 +34,12 @@ graph TD
     A --> D[SEC Edgar Database]
     A --> E[Pusher Real-time Service]
     A --> F[Mistral/Gemini AI Models]
+    A --> K[ElevenLabs Speech API]
     C --> G[Real-time Market Data]
     D --> H[Regulatory Filings]
     E --> I[Live Chat Updates]
     F --> J[Natural Language Analysis]
+    K --> L[Audio Generation]
 ```
 
 ### Data Flow Diagram
@@ -73,6 +76,7 @@ sequenceDiagram
 - PostgreSQL (recommended) or SQLite
 - Pusher account (for real-time features)
 - Mistral or Gemini API keys
+- ElevenLabs API key (for speech synthesis)
 
 ### Installation
 
@@ -85,7 +89,14 @@ uv sync  # or pip install -r requirements.txt
 
 # Set up environment variables
 cp .env.example .env
-# Edit .env with your API keys
+# Edit .env with your API keys including:
+# ELEVENLABS_API_KEY=your_api_key_here
+# MISTRAL_API_KEY=your_mistral_key
+# GEMINI_API_KEY=your_gemini_key
+# PUSHER_APP_ID=your_pusher_id
+# PUSHER_KEY=your_pusher_key
+# PUSHER_SECRET=your_pusher_secret
+# PUSHER_CLUSTER=your_pusher_cluster
 
 # Run migrations
 python manage.py migrate
@@ -139,6 +150,25 @@ class DCFService:
         
         # 6. Determine intrinsic value
         return intrinsic_value_per_share
+```
+
+### 3. Speech Synthesis
+
+The platform integrates ElevenLabs for audio generation:
+
+```python
+# Example speech synthesis
+class AudioService:
+    def generate_speech(text, voice_id):
+        # Convert text to speech using ElevenLabs API
+        response = elevenlabs.generate(
+            text=text,
+            voice=voice_id,
+            model="eleven_multilingual_v2"
+        )
+        
+        # Stream audio to frontend
+        return response.audio_stream
 ```
 
 ### 3. Real-time Communication
