@@ -331,7 +331,9 @@ const Dashboard = () => {
                             onFocus={() => { if (suggestions.length > 0) setShowSuggestions(true); }}
                         />
                         {isFetchingSuggestions && (
-                            <Loader2 className="animate-spin" size={16} style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', color: 'var(--text-muted)' }} />
+                            <div style={{ position: 'absolute', right: '12px', top: '50%', transform: 'translateY(-50%)', display: 'flex', alignItems: 'center' }}>
+                                <Loader2 className="animate-spin" size={16} style={{ color: 'var(--text-muted)' }} />
+                            </div>
                         )}
 
                         {showSuggestions && suggestions.length > 0 && (

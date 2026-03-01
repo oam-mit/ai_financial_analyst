@@ -73,65 +73,96 @@ class DCFService:
             stock = yf.Ticker(ticker)
             info = stock.info
             
-            # Simple DCF logic
-            # FCF = Cash Flow From Operations - CapEx
-            cf = stock.cashflow
-            if cf.empty:
-                return {"error": "No cashflow data available"}
+            # 1. Determine Base Cash Flow (use TTM FCF or Net Income as heuristic)
+            # FCF can be temporarily depressed by growth CapEx, so we use max(FCF, Net Income) for growth companies
+            fcf = info.get('freeCashflow')
+            net_income = info.get('netIncomeToCommon')
             
-            # Get latest values with robust key checking
-            try:
-                # Try common names for Operating Cash Flow
-                cfo_keys = ['Cash Flow From Operating Activities', 'Operating Cash Flow', 'Total Cash From Operating Activities']
-                cfo = None
-                for key in cfo_keys:
-                    if key in cf.index:
-                        cfo = cf.loc[key].iloc[0]
-                        break
-                
-                if cfo is None:
-                    return {"error": f"Operating Cash Flow not found. Available keys: {list(cf.index)[:5]}..."}
-
-                # Try common names for CapEx
-                capex_keys = ['Capital Expenditures', 'Capital Expenditure', 'Net Income From Continuing Ops'] # Net Income as very poor fallback if needed, but let's stick to Capex
-                capex = 0
-                for key in capex_keys:
-                    if key in cf.index:
-                        capex = abs(cf.loc[key].iloc[0])
-                        break
-                
-                fcf = cfo - capex
-            except Exception as e:
-                return {"error": f"Could not calculate FCF: {str(e)}"}
-
-            # Growth rate (assumed 5% for simple model)
-            growth_rate = 0.05
-            # Discount rate (assumed 10% WACC)
-            wacc = 0.10
-            # Terminal growth rate
-            tg = 0.02
+            # Fallbacks if info is missing
+            if fcf is None or net_income is None:
+                cf = stock.cashflow
+                if not cf.empty:
+                    if fcf is None:
+                        cfo_keys = ['Cash Flow From Operating Activities', 'Operating Cash Flow']
+                        cfo = None
+                        for k in cfo_keys:
+                            if k in cf.index:
+                                cfo = cf.loc[k].iloc[0]
+                                break
+                        capex = 0
+                        capex_keys = ['Capital Expenditure', 'Capital Expenditures']
+                        for k in capex_keys:
+                            if k in cf.index:
+                                capex = abs(cf.loc[k].iloc[0])
+                                break
+                        if cfo:
+                            fcf = cfo - capex
+                    
+                    if net_income is None:
+                        if 'Net Income From Continuing Operations' in cf.index:
+                            net_income = cf.loc['Net Income From Continuing Operations'].iloc[0]
             
-            # Project 5 years
-            projections = []
-            current_fcf = fcf
+            # Use max to capture "owners earnings" potential for growth investors
+            base_fcf = max(fcf or 0, net_income or 0)
+            
+            # Last resort fallback to a conservative margin of revenue
+            if base_fcf <= 0:
+                rev = info.get('totalRevenue', 0)
+                if rev:
+                    base_fcf = rev * 0.10 # Assume 10% FCF margin as baseline
+                else:
+                    return {"error": "Insufficient financial data for DCF"}
+
+            # 2. Growth Rate Heuristic
+            # Use analyst estimates (capped for conservatism)
+            growth_rate = 0.08 # default
+            analyst_growth = info.get('earningsGrowth') or info.get('revenueGrowth')
+            if analyst_growth and isinstance(analyst_growth, (int, float)):
+                # Clip growth between 5% and 20% for first stage
+                growth_rate = max(0.05, min(0.20, analyst_growth))
+            
+            # Growth stock floor (High PE stocks usually have higher growth expectations)
+            forward_pe = info.get('forwardPE')
+            if forward_pe and forward_pe > 30 and growth_rate < 0.12:
+                growth_rate = 0.12
+
+            # 3. Discount Rate (WACC)
+            wacc = 0.09 # Standard 9% discount rate
+            
+            # 4. Terminal Growth Rate
+            tg = 0.025 # 2.5% terminal growth
+            
+            # 5. Project 5 years
+            projections_pv = []
+            current_fcf = base_fcf
             for i in range(1, 6):
                 current_fcf *= (1 + growth_rate)
-                projections.append(current_fcf / ((1 + wacc) ** i))
+                # Correct DCF: Discount each future FCF to Present Value
+                projections_pv.append(current_fcf / ((1 + wacc) ** i))
             
-            pv_fcf = sum(projections)
+            pv_fcf_sum = sum(projections_pv)
             
-            # Terminal Value
-            tv = (projections[-1] * (1 + tg)) / (wacc - tg)
+            # 6. Terminal Value (Terminal Value at end of year 5)
+            # TV = [FCF_year5 * (1 + tg)] / (wacc - tg)
+            tv = (current_fcf * (1 + tg)) / (wacc - tg)
+            # PV of Terminal Value (discounted back 5 years once)
             pv_tv = tv / ((1 + wacc) ** 5)
             
-            intrinsic_value_equity = pv_fcf + pv_tv
+            # 7. Enterprise Value (EV)
+            enterprise_value = pv_fcf_sum + pv_tv
             
-            # Shares outstanding
+            # 8. Equity Value Adjustment (Net Debt)
+            # Equity Value = Enterprise Value + Cash - Debt
+            total_cash = info.get('totalCash', 0)
+            total_debt = info.get('totalDebt', 0)
+            equity_value = enterprise_value + total_cash - total_debt
+            
+            # 9. Shares Outstanding
             shares = info.get('sharesOutstanding')
             if not shares:
                 return {"error": "Shares outstanding not found"}
             
-            intrinsic_value_per_share = intrinsic_value_equity / shares
+            intrinsic_value_per_share = equity_value / shares
             current_price = info.get('currentPrice')
 
             return {
@@ -139,7 +170,7 @@ class DCFService:
                 "current_price": current_price,
                 "intrinsic_value": intrinsic_value_per_share,
                 "upside": (intrinsic_value_per_share - current_price) / current_price if current_price else 0,
-                "fcf_base": fcf,
+                "fcf_base": base_fcf,
                 "growth_rate_used": growth_rate,
                 "wacc_used": wacc
             }
