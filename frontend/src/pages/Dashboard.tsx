@@ -1013,7 +1013,7 @@ const Dashboard = () => {
                                     fontWeight: '800',
                                     letterSpacing: '-0.02em'
                                 }}>
-                                    AI Financial Hub
+                                    FinAI Analyst
                                 </h1>
                                 <p style={{
                                     fontSize: '1.25rem',
