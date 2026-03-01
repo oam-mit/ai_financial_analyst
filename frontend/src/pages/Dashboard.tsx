@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, Send, TrendingUp, BookOpen, LogOut, Loader2, Menu, X, ChevronRight, History, RefreshCw, ArrowUpRight, ArrowDownRight } from 'lucide-react';
+import { Search, Send, TrendingUp, BookOpen, LogOut, Loader2, Menu, X, ChevronRight, History, RefreshCw, ArrowUpRight, ArrowDownRight, Music, Play } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import apiClient from '../api/client';
 import ReactMarkdown from 'react-markdown';
@@ -13,6 +13,7 @@ interface Message {
     content: string;
     is_analysis?: boolean;
     isTyping?: boolean;
+    highlights?: Highlight[];
 }
 
 interface Session {
@@ -30,6 +31,13 @@ interface Suggestion {
 interface Price {
     price: number | null;
     change_percent?: number;
+}
+
+interface Highlight {
+    start: number;
+    end: number;
+    label: string;
+    description: string;
 }
 
 const preprocessContent = (text: string) => {
@@ -110,8 +118,13 @@ const Dashboard = () => {
     const [currentPrice, setCurrentPrice] = useState<Price | null>(null);
     const [isRefreshingPrice, setIsRefreshingPrice] = useState(false);
     const [modelChoice, setModelChoice] = useState<'mistral' | 'gemini'>('mistral');
+    const [highlights, setHighlights] = useState<Highlight[]>([]);
+    const [activeAudio, setActiveAudio] = useState<string | null>(null);
+    const [activeClip, setActiveClip] = useState<{ start: number, end: number } | null>(null);
+    const [isHighlightsOpen, setIsHighlightsOpen] = useState(false);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const suggestionRef = useRef<HTMLDivElement>(null);
+    const audioRef = useRef<HTMLAudioElement>(null);
 
     const scrollToBottom = useCallback(() => {
         chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -223,7 +236,17 @@ const Dashboard = () => {
         try {
             const response = await apiClient.post('chats/start_or_get_latest/', { symbol: stockSymbol });
             setSession(response.data);
-            setMessages(response.data.messages || []);
+            const loadedMessages = response.data.messages || [];
+            setMessages(loadedMessages);
+
+            // Extract highlights from the latest analysis message if it exists
+            const analysisMsg = [...loadedMessages].reverse().find(m => m.is_analysis && m.highlights);
+            if (analysisMsg && analysisMsg.highlights) {
+                setHighlights(analysisMsg.highlights);
+            } else {
+                setHighlights([]);
+            }
+
             setCurrentStock(stockSymbol.toUpperCase());
             // fetchPrice is now handled by useEffect on currentStock
         } catch (err) {
@@ -290,7 +313,18 @@ const Dashboard = () => {
             if (!response.ok) throw new Error('Analysis request failed');
             const data = await response.json();
 
-            const assistantMsg: Message = { role: 'assistant', content: data.content, is_analysis: true, isTyping: true };
+            if (data.highlights) {
+                setHighlights(data.highlights);
+                setIsHighlightsOpen(true); // Open highlights panel automatically on new analysis
+            }
+
+            const assistantMsg: Message = {
+                role: 'assistant',
+                content: data.content,
+                is_analysis: true,
+                isTyping: true,
+                highlights: data.highlights
+            };
             setMessages(prev => [...prev, assistantMsg]);
         } catch (err) {
             console.error(err);
@@ -300,6 +334,16 @@ const Dashboard = () => {
     };
 
 
+
+    const playAudioClip = (start: number, end: number) => {
+        if (!currentStock) return;
+        const url = `http://localhost:8000/api/stocks/${currentStock}/audio_clip/?start=${start}&end=${end}`;
+        setActiveAudio(url);
+        setActiveClip({ start, end });
+        if (audioRef.current) {
+            audioRef.current.load();
+        }
+    };
 
     return (
         <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -490,6 +534,30 @@ const Dashboard = () => {
                                             onTyped={scrollToBottom}
                                             onComplete={() => handleTypingComplete(i)}
                                         />
+                                        {m.is_analysis && m.highlights && m.highlights.length > 0 && !m.isTyping && (
+                                            <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-start' }}>
+                                                <button
+                                                    onClick={() => {
+                                                        setHighlights(m.highlights || []);
+                                                        setIsHighlightsOpen(true);
+                                                    }}
+                                                    className="btn-primary"
+                                                    style={{
+                                                        background: 'rgba(0, 200, 5, 0.15)',
+                                                        color: 'var(--primary)',
+                                                        border: '1px solid var(--primary)',
+                                                        fontSize: '0.85rem',
+                                                        padding: '0.5rem 1rem',
+                                                        display: 'flex',
+                                                        alignItems: 'center',
+                                                        gap: '0.5rem'
+                                                    }}
+                                                >
+                                                    <Music size={16} />
+                                                    View Transcript Highlights
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
@@ -525,27 +593,74 @@ const Dashboard = () => {
                             </button>
                         </form>
                     </section>
-                ) : isLoading ? (
-                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
-                        <div className="glass-card animate-fade-in" style={{
-                            padding: '3rem',
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            gap: '1.5rem',
-                            background: 'var(--bg-card)',
-                            boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-                            textAlign: 'center'
-                        }}>
-                            <Loader2 className="animate-spin" size={48} color="var(--primary)" />
-                            <div>
-                                <h2 style={{ fontSize: '1.5rem', color: 'var(--text-main)', marginBottom: '0.5rem' }}>Initializing Analysis</h2>
-                                <p style={{ color: 'var(--text-muted)' }}>Fetching SEC filings and market data for {symbol}...</p>
+                ) : null}
+
+                {/* Highlights Sidebar */}
+                {session && highlights.length > 0 && isHighlightsOpen && (
+                    <section className="glass-card animate-fade-in" style={{ width: '380px', display: 'flex', flexDirection: 'column', overflow: 'hidden', borderLeft: '1px solid var(--glass-border)' }}>
+                        <div style={{ padding: '1.25rem', borderBottom: '1px solid var(--glass-border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+                                <div style={{ background: 'var(--primary)', padding: '0.5rem', borderRadius: '0.5rem', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                                    <Music size={18} color="white" />
+                                </div>
+                                <div>
+                                    <h3 style={{ fontSize: '1.1rem', fontWeight: '700' }}>Transcript Highlights</h3>
+                                    <p style={{ fontSize: '0.7rem', color: 'var(--text-muted)' }}>Something to keep in mind</p>
+                                </div>
                             </div>
+                            <button
+                                onClick={() => setIsHighlightsOpen(false)}
+                                style={{ background: 'transparent', color: 'var(--text-muted)', padding: '0.5rem' }}
+                                className="hover-effect"
+                            >
+                                <X size={20} />
+                            </button>
                         </div>
-                    </div>
-                ) : (
-                    /* Hero Banner */
+                        <div style={{ flex: 1, overflowY: 'auto', padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+                            {highlights.map((h, i) => (
+                                <div key={i} className="glass-card" style={{ padding: '1.25rem', borderLeft: '4px solid var(--primary)', background: 'rgba(0, 200, 5, 0.03)', transition: 'transform 0.2s' }}>
+                                    <div style={{ fontWeight: '700', color: 'var(--primary)', marginBottom: '0.5rem', fontSize: '0.95rem' }}>{h.label}</div>
+                                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginBottom: '1rem', lineHeight: '1.5' }}>{h.description}</p>
+                                    <button
+                                        className="btn-primary"
+                                        style={{ width: '100%', fontSize: '0.8rem', padding: '0.6rem', background: 'rgba(0, 200, 5, 0.1)', color: 'var(--primary)', border: '1px solid rgba(0, 200, 5, 0.2)' }}
+                                        onClick={() => playAudioClip(h.start, h.end)}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
+                                            <Play size={14} />
+                                            Listen ({Math.round(h.end - h.start)}s)
+                                        </div>
+                                    </button>
+                                </div>
+                            ))}
+                        </div>
+                        {activeAudio && (
+                            <div style={{ padding: '1rem', borderTop: '1px solid var(--glass-border)' }}>
+                                <audio
+                                    ref={audioRef}
+                                    controls
+                                    autoPlay
+                                    style={{ width: '100%', height: '32px' }}
+                                    onLoadedMetadata={(e) => {
+                                        if (activeClip) {
+                                            e.currentTarget.currentTime = activeClip.start;
+                                        }
+                                    }}
+                                    onTimeUpdate={(e) => {
+                                        if (activeClip && e.currentTarget.currentTime >= activeClip.end) {
+                                            e.currentTarget.pause();
+                                        }
+                                    }}
+                                >
+                                    <source src={activeAudio} type="audio/mpeg" />
+                                </audio>
+                            </div>
+                        )}
+                    </section>
+                )}
+
+                {/* Hero Banner (if no session and not loading) */}
+                {!session && !isLoading && (
                     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
                         <div className="glass-card animate-fade-in" style={{
                             padding: '4rem 2rem',
@@ -619,6 +734,28 @@ const Dashboard = () => {
                                         <span style={{ fontSize: '0.9rem', fontWeight: '500' }}>{item.label}</span>
                                     </div>
                                 ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Loading State (if no session and loading) */}
+                {!session && isLoading && (
+                    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '2rem' }}>
+                        <div className="glass-card animate-fade-in" style={{
+                            padding: '3rem',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            gap: '1.5rem',
+                            background: 'var(--bg-card)',
+                            boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+                            textAlign: 'center'
+                        }}>
+                            <Loader2 className="animate-spin" size={48} color="var(--primary)" />
+                            <div>
+                                <h2 style={{ fontSize: '1.5rem', color: 'var(--text-main)', marginBottom: '0.5rem' }}>Initializing Analysis</h2>
+                                <p style={{ color: 'var(--text-muted)' }}>Fetching SEC filings and market data for {symbol}...</p>
                             </div>
                         </div>
                     </div>
