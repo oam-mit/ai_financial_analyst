@@ -22,6 +22,7 @@ Financial AI is a comprehensive investment research platform that combines real-
 - **Real-time Chat Interface**: Ask questions about specific companies
 - **Audio Clip Extraction**: Listen to key moments from earnings calls
 - **Speech Synthesis**: ElevenLabs-powered audio generation for analysis summaries
+- **Earnings Call Data**: Integration with EarningsCall.biz for comprehensive call transcripts and schedules
 
 ## 🔧 Technology Stack
 
@@ -35,11 +36,13 @@ graph TD
     A --> E[Pusher Real-time Service]
     A --> F[Mistral/Gemini AI Models]
     A --> K[ElevenLabs Speech API]
+    A --> M[EarningsCall.biz API]
     C --> G[Real-time Market Data]
     D --> H[Regulatory Filings]
     E --> I[Live Chat Updates]
     F --> J[Natural Language Analysis]
     K --> L[Audio Generation]
+    M --> N[Earnings Call Data]
 ```
 
 ### Data Flow Diagram
@@ -77,6 +80,7 @@ sequenceDiagram
 - Pusher account (for real-time features)
 - Mistral or Gemini API keys
 - ElevenLabs API key (for speech synthesis)
+- EarningsCall.biz API key (for earnings call data)
 
 ### Installation
 
@@ -91,6 +95,7 @@ uv sync  # or pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your API keys including:
 # ELEVENLABS_API_KEY=your_api_key_here
+# EARNINGSCALL_API_KEY=your_earningscall_key
 # MISTRAL_API_KEY=your_mistral_key
 # GEMINI_API_KEY=your_gemini_key
 # PUSHER_APP_ID=your_pusher_id
@@ -169,6 +174,33 @@ class AudioService:
         
         # Stream audio to frontend
         return response.audio_stream
+```
+
+### 4. Earnings Call Integration
+
+```python
+# Example earnings call data fetching
+class EarningsCallService:
+    def fetch_earnings_calls(ticker):
+        # Get upcoming and historical earnings calls
+        calls = earningscall_api.get_calls(ticker)
+        
+        # Download transcripts
+        transcripts = []
+        for call in calls:
+            transcript = earningscall_api.get_transcript(call.id)
+            transcripts.append({
+                'date': call.date,
+                'content': transcript.text,
+                'audio_url': transcript.audio_url
+            })
+        
+        return transcripts
+    
+    def get_earnings_schedule(ticker):
+        # Get upcoming earnings dates
+        schedule = earningscall_api.get_schedule(ticker)
+        return schedule.upcoming_calls
 ```
 
 ### 3. Real-time Communication
