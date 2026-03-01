@@ -47,6 +47,9 @@ graph TD
 
 ### Data Flow Diagram
 
+![Backend Architecture Screenshot](docs_assets/backend-architecture.png)
+
+
 ```mermaid
 sequenceDiagram
     participant User
