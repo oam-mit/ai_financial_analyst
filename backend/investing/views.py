@@ -257,12 +257,14 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
                 highlights=highlights
             )
             
-            # Notify frontend that everything is complete
+            # Notify frontend that everything is complete - avoid sending massive content in Pusher to prevent "Too much data" error
             from .pusher_utils import trigger_pusher_event
+            # Truncate content for Pusher - the frontend should already have it via chunks
+            pusher_content = (full_text[:5000] + "... [truncated]") if len(full_text) > 5000 else full_text
             trigger_pusher_event(pusher_channel, 'ai-complete', {
                 'highlights': highlights, 
                 'is_analysis': True, 
-                'content': full_text
+                'content': pusher_content
             })
             
             return {"content": full_text, "highlights": highlights}
@@ -292,8 +294,9 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         llm_service = LLMService(model_choice=model_choice)
         pusher_channel = f"chat_{session.id}"
         
+        symbol = session.stock.symbol
         async def process_message():
-            full_text = await llm_service.get_chat_response_v2(history, user_content, pusher_channel=pusher_channel)
+            full_text = await llm_service.get_chat_response_v2(symbol, history, user_content, pusher_channel=pusher_channel)
             await sync_to_async(ChatMessage.objects.create)(
                 session=session, 
                 role='assistant', 
@@ -301,7 +304,9 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
             )
             
             from .pusher_utils import trigger_pusher_event
-            trigger_pusher_event(pusher_channel, 'ai-complete', {'content': full_text})
+            # Truncate content for Pusher
+            pusher_content = (full_text[:5000] + "... [truncated]") if len(full_text) > 5000 else full_text
+            trigger_pusher_event(pusher_channel, 'ai-complete', {'content': pusher_content})
             
             return full_text
 

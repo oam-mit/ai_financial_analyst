@@ -414,14 +414,53 @@ class LLMService:
             except Exception as e:
                 return f"Gemini API Error: {str(e)}"
 
-    async def get_chat_response_v2(self, history, current_query, pusher_channel=None):
+    async def get_chat_response_v2(self, stock_symbol, history, current_query, pusher_channel=None):
+        from .models import Stock
         from .pusher_utils import trigger_pusher_event
         full_text = ""
+        
+        # 1. Fetch latest SEC filing content each time
+        try:
+            stock = await sync_to_async(Stock.objects.get)(symbol=stock_symbol)
+            
+            def get_latest_filing(s):
+                return SECFiling.objects.filter(stock=s).order_by('-filing_date', '-id').first()
+                
+            latest_filing = await sync_to_async(get_latest_filing)(stock)
+            filing_content = ""
+            
+            if not latest_filing:
+                # If no filings in DB, try to fetch them first
+                sec_service = SECService()
+                await sync_to_async(sec_service.fetch_last_4_filings)(stock)
+                latest_filing = await sync_to_async(get_latest_filing)(stock)
+
+            if latest_filing:
+                filing_content = await sync_to_async(read_filing_content)(latest_filing.content_path)
+        except Exception as e:
+            print(f"Error fetching filing for chat: {e}")
+            filing_content = ""
+
+        # 2. Build detailed prompt with filing content - ENFORCING STRICTNESS
+        if filing_content:
+            context_msg = (
+                f"STRICT INSTRUCTIONS: Answer the following question using ONLY the SEC filing content provided below. "
+                f"Do not use external knowledge or general information. If the specific information requested is NOT present "
+                f"in this text, you MUST explicitly state: 'This information is not available in the latest SEC filing.'\n\n"
+                f"LATEST SEC FILING CONTENT FOR {stock_symbol} (TRUNCATED):\n{filing_content[:20000]}"
+            )
+        else:
+            context_msg = f"No SEC filing data is currently available for {stock_symbol}. Please inform the user that you cannot answer based on filing data at this time."
+
         if self.model_choice == 'mistral' and self.mistral_client:
             messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            # Inject filing context early in the conversation
+            messages.append({"role": "system", "content": context_msg})
+            
             for h in history:
                 messages.append({"role": h['role'], "content": h['content']})
             messages.append({"role": "user", "content": current_query})
+            
             try:
                 stream = await self.mistral_client.chat.stream_async(
                     model="mistral-medium-latest",
@@ -443,12 +482,21 @@ class LLMService:
                 return f"Mistral API Error: {str(e)}"
         else:
             gemini_history = []
+            # For Gemini, we also want to inject the context
+            # We can put it in the first message's parts or as a separate turn
+            
+            # Start with the context as a quasi-system instruction turn if history is empty, 
+            # or just prepend it to the current query if we want it to be "freshest".
+            # Prepended to current_query is usually most reliable for "latest filing" requirement.
+            
+            enriched_query = f"{context_msg}\n\nUSER QUESTION: {current_query}"
+            
             for h in history:
                 gemini_history.append({"role": "user" if h['role'] == 'user' else "model", "parts": [h['content']]})
             
             try:
                 chat = self.gemini_model.start_chat(history=gemini_history)
-                response = await chat.send_message_async(current_query, stream=bool(pusher_channel))
+                response = await chat.send_message_async(enriched_query, stream=bool(pusher_channel))
                 if pusher_channel:
                     async for chunk in response:
                         content = chunk.text
