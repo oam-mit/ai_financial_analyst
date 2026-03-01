@@ -27,6 +27,13 @@ class StockViewSet(viewsets.ModelViewSet):
     serializer_class = StockSerializer
     lookup_field = 'symbol'
 
+    @action(detail=True, methods=['get'])
+    def filings(self, request, symbol=None):
+        stock = self.get_object()
+        filings = stock.filings.all().order_by('-filing_date', '-id')
+        serializer = SECFilingSerializer(filings, many=True)
+        return Response(serializer.data)
+
     @action(detail=True, methods=['post'])
     def fetch_filings(self, request, symbol=None):
         stock = self.get_object()
@@ -229,12 +236,13 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         session = self.get_object()
         stock = session.stock
         model_choice = request.data.get('model_choice', 'mistral')
+        filing_id = request.data.get('filing_id')
         llm_service = LLMService(model_choice=model_choice)
         pusher_channel = f"chat_{session.id}"
         
         async def process_analysis():
             # 1. Main analysis (with streaming to Pusher)
-            full_text = await llm_service.get_analysis_v2(stock.symbol, pusher_channel=pusher_channel)
+            full_text = await llm_service.get_analysis_v2(stock.symbol, pusher_channel=pusher_channel, filing_id=filing_id)
             
             # 2. Get highlights from transcript (fetch from DB)
             highlights = []
@@ -291,12 +299,13 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
         
         # Use MCP-powered LLM Service
         model_choice = request.data.get('model_choice', 'mistral')
+        filing_id = request.data.get('filing_id')
         llm_service = LLMService(model_choice=model_choice)
         pusher_channel = f"chat_{session.id}"
         
         symbol = session.stock.symbol
         async def process_message():
-            full_text = await llm_service.get_chat_response_v2(symbol, history, user_content, pusher_channel=pusher_channel)
+            full_text = await llm_service.get_chat_response_v2(symbol, history, user_content, pusher_channel=pusher_channel, filing_id=filing_id)
             await sync_to_async(ChatMessage.objects.create)(
                 session=session, 
                 role='assistant', 

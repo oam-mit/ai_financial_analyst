@@ -13,6 +13,19 @@ class SECService:
         user_email = email or getattr(settings, 'SEC_USER_AGENT_EMAIL', "myemail@example.com")
         self.dl = Downloader(company, user_email, settings.BASE_DIR / "sec_filings")
 
+    def _parse_filing_date(self, filing_path):
+        """Parse the actual filing date from the SEC submission header."""
+        import re
+        try:
+            with open(filing_path, 'r', encoding='utf-8', errors='ignore') as f:
+                header = f.read(2000)  # Only need the header
+            match = re.search(r'FILED AS OF DATE:\s+(\d{8})', header)
+            if match:
+                return datetime.strptime(match.group(1), '%Y%m%d').date()
+        except Exception as e:
+            print(f"Could not parse filing date from {filing_path}: {e}")
+        return None
+
     def fetch_last_4_filings(self, stock_obj):
         import time
         ticker = stock_obj.symbol
@@ -66,10 +79,8 @@ class SECService:
                      else:
                          continue
 
-                # Get filing date from the downloader's metadata or just use current if not easily available
-                # In a real app, we'd parse the filing header for the period end date
-                # For now, we use a placeholder date or try to parse from directory if possible
-                filing_date = datetime.now().date() 
+                # Parse the actual filing date from the SEC submission header
+                filing_date = self._parse_filing_date(filing_path) or datetime.now().date()
 
                 filing = SECFiling.objects.create(
                     stock=stock_obj,
@@ -331,21 +342,24 @@ class LLMService:
                 print(f"Gemini Error: {e}")
                 return []
 
-    async def get_analysis_v2(self, stock_symbol, pusher_channel=None):
-        from .models import Stock
+    async def get_analysis_v2(self, stock_symbol, pusher_channel=None, filing_id=None):
+        from .models import Stock, SECFiling
         from .pusher_utils import trigger_pusher_event
         # import DCFService safely
         DCFService_cls = globals().get('DCFService')
 
         try:
             stock = await sync_to_async(Stock.objects.get)(symbol=stock_symbol)
-            # Only analyze the most recent SEC filing
-            latest_filing = await sync_to_async(stock.filings.order_by('-accession_number').first)()
             
-            def get_all_filings_data():
-                return [read_filing_content(latest_filing.content_path)] if latest_filing else []
+            if filing_id:
+                selected_filing = await sync_to_async(SECFiling.objects.filter(id=filing_id, stock=stock).first)()
+            else:
+                selected_filing = await sync_to_async(stock.filings.order_by('-filing_date', '-id').first)()
+
+            def get_filing_data(filing):
+                return [read_filing_content(filing.content_path)] if filing else []
                 
-            filings_data = await sync_to_async(get_all_filings_data)()
+            filings_data = await sync_to_async(get_filing_data)(selected_filing)
             dcf_data = await sync_to_async(DCFService_cls.calculate_dcf)(stock_symbol)
         except Exception as e:
             return f"Error fetching data for {stock_symbol}: {str(e)}"
@@ -414,29 +428,33 @@ class LLMService:
             except Exception as e:
                 return f"Gemini API Error: {str(e)}"
 
-    async def get_chat_response_v2(self, stock_symbol, history, current_query, pusher_channel=None):
-        from .models import Stock
+    async def get_chat_response_v2(self, stock_symbol, history, current_query, pusher_channel=None, filing_id=None):
+        from .models import Stock, SECFiling
         from .pusher_utils import trigger_pusher_event
         full_text = ""
         
-        # 1. Fetch latest SEC filing content each time
+        # 1. Fetch SEC filing content
         try:
             stock = await sync_to_async(Stock.objects.get)(symbol=stock_symbol)
             
-            def get_latest_filing(s):
+            def get_filing(s, f_id=None):
+                if f_id:
+                    return SECFiling.objects.filter(id=f_id, stock=s).first()
                 return SECFiling.objects.filter(stock=s).order_by('-filing_date', '-id').first()
                 
-            latest_filing = await sync_to_async(get_latest_filing)(stock)
+            selected_filing = await sync_to_async(get_filing)(stock, filing_id)
             filing_content = ""
             
-            if not latest_filing:
-                # If no filings in DB, try to fetch them first
+            if not selected_filing and not filing_id:
+                # If no filings in DB and none requested, try to fetch them first
                 sec_service = SECService()
                 await sync_to_async(sec_service.fetch_last_4_filings)(stock)
-                latest_filing = await sync_to_async(get_latest_filing)(stock)
+                selected_filing = await sync_to_async(get_filing)(stock)
 
-            if latest_filing:
-                filing_content = await sync_to_async(read_filing_content)(latest_filing.content_path)
+            if selected_filing:
+                filing_content = await sync_to_async(read_filing_content)(selected_filing.content_path)
+            elif filing_id:
+                 print(f"Requested filing {filing_id} not found for {stock_symbol}")
         except Exception as e:
             print(f"Error fetching filing for chat: {e}")
             filing_content = ""

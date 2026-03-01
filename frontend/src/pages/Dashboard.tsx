@@ -41,6 +41,13 @@ interface Highlight {
     description: string;
 }
 
+interface Filing {
+    id: number;
+    filing_type: '10-K' | '10-Q';
+    filing_date: string;
+    accession_number: string;
+}
+
 const preprocessContent = (text: string) => {
     if (!text) return '';
 
@@ -126,6 +133,9 @@ const Dashboard = () => {
     const [activeClip, setActiveClip] = useState<{ start: number, end: number } | null>(null);
     const [isHighlightsOpen, setIsHighlightsOpen] = useState(false);
     const [isHighlightsLoading, setIsHighlightsLoading] = useState(false);
+    const [availableFilings, setAvailableFilings] = useState<Filing[]>([]);
+    const [selectedFilingType, setSelectedFilingType] = useState<'10-K' | '10-Q' | ''>('');
+    const [selectedFilingId, setSelectedFilingId] = useState<number | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const suggestionRef = useRef<HTMLDivElement>(null);
     const audioRef = useRef<HTMLAudioElement>(null);
@@ -348,6 +358,22 @@ const Dashboard = () => {
         setIsRefreshingPrice(false);
     };
 
+    const fetchFilings = async (stockSymbol: string) => {
+        try {
+            const response = await apiClient.get(`stocks/${stockSymbol}/filings/`);
+            setAvailableFilings(response.data);
+
+            // Default select the latest filing
+            if (response.data.length > 0) {
+                const latest = response.data[0];
+                setSelectedFilingType(latest.filing_type);
+                setSelectedFilingId(latest.id);
+            }
+        } catch (err) {
+            console.error('Failed to fetch filings:', err);
+        }
+    };
+
     const startSearch = async (stockSymbol: string) => {
         setIsLoading(true);
         try {
@@ -365,6 +391,10 @@ const Dashboard = () => {
             }
 
             setCurrentStock(stockSymbol.toUpperCase());
+
+            // Fetch filings for the stock
+            await fetchFilings(stockSymbol);
+
             // Force scroll to bottom after messages load
             setTimeout(() => {
                 scrollToBottom(true);
@@ -402,7 +432,11 @@ const Dashboard = () => {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ content: currentInput, model_choice: modelChoice })
+                body: JSON.stringify({
+                    content: currentInput,
+                    model_choice: modelChoice,
+                    filing_id: selectedFilingId
+                })
             });
 
             if (!response.ok) throw new Error('Request failed');
@@ -428,7 +462,10 @@ const Dashboard = () => {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ model_choice: modelChoice })
+                body: JSON.stringify({
+                    model_choice: modelChoice,
+                    filing_id: selectedFilingId
+                })
             });
 
             if (!response.ok) throw new Error('Analysis request failed');
@@ -603,6 +640,52 @@ const Dashboard = () => {
                                 {isAnalyzing ? <Loader2 className="animate-spin" size={16} /> : <BookOpen size={16} />}
                                 {isAnalyzing ? 'Deep Dive Analysis...' : 'New Deep Dive Analysis'}
                             </button>
+                        </div>
+
+                        {/* Filing Selection Dropdowns */}
+                        <div style={{ padding: '0.75rem 1.25rem', borderBottom: '1px solid var(--glass-border)', background: 'rgba(255,255,255,0.01)', display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '600' }}>REPORT TYPE:</span>
+                                <select
+                                    value={selectedFilingType}
+                                    onChange={(e) => {
+                                        const type = e.target.value as '10-K' | '10-Q';
+                                        setSelectedFilingType(type);
+                                        // Auto-select latest of this type
+                                        const latestOfType = availableFilings.find(f => f.filing_type === type);
+                                        if (latestOfType) setSelectedFilingId(latestOfType.id);
+                                    }}
+                                    style={{ padding: '0.35rem 0.5rem', borderRadius: '0.4rem', background: 'var(--bg-card)', color: 'var(--text-main)', border: '1px solid var(--glass-border)', fontSize: '0.8rem' }}
+                                >
+                                    <option value="10-K">Annual Rep. (10-K)</option>
+                                    <option value="10-Q">Quarterly Rep. (10-Q)</option>
+                                </select>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flex: 1 }}>
+                                <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: '600' }}>SELECT FILING:</span>
+                                <select
+                                    value={selectedFilingId || ''}
+                                    onChange={(e) => setSelectedFilingId(Number(e.target.value))}
+                                    style={{ padding: '0.35rem 0.5rem', borderRadius: '0.4rem', background: 'var(--bg-card)', color: 'var(--text-main)', border: '1px solid var(--glass-border)', fontSize: '0.8rem', flex: 1, maxWidth: '300px' }}
+                                >
+                                    {availableFilings
+                                        .filter(f => f.filing_type === selectedFilingType)
+                                        .map(f => (
+                                            <option key={f.id} value={f.id}>
+                                                {f.filing_date} ({f.accession_number})
+                                            </option>
+                                        ))
+                                    }
+                                    {availableFilings.filter(f => f.filing_type === selectedFilingType).length === 0 && (
+                                        <option value="">No filings found</option>
+                                    )}
+                                </select>
+                            </div>
+
+                            <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                                LLM will answer based on this selection
+                            </div>
                         </div>
 
                         <div style={{ flex: 1, overflowY: 'auto', padding: '2rem', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
