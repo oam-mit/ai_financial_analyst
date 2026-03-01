@@ -9,6 +9,7 @@ dependencies = [
     "django-cors-headers>=4.9.0",
     "djangorestframework>=3.16.1",
     "djangorestframework-simplejwt>=5.5.1",
+    "elevenlabs>=2.37.0",
     "google-genai>=1.60.0",
     "mcp>=1.26.0",
     "pyrate-limiter==3.6.0",

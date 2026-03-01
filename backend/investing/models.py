@@ -6,6 +6,7 @@ class Stock(models.Model):
     company_name = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    transcript = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return self.symbol
@@ -42,6 +43,7 @@ class ChatMessage(models.Model):
     role = models.CharField(max_length=10, choices=(('user', 'User'), ('assistant', 'Assistant')))
     content = models.TextField()
     is_analysis = models.BooleanField(default=False)  # If this message is the deep dive analysis
+    highlights = models.JSONField(null=True, blank=True) # Store transcript highlights for this session
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

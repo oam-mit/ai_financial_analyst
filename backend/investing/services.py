@@ -172,7 +172,11 @@ class DCFService:
                 "upside": (intrinsic_value_per_share - current_price) / current_price if current_price else 0,
                 "fcf_base": base_fcf,
                 "growth_rate_used": growth_rate,
-                "wacc_used": wacc
+                "wacc_used": wacc,
+                "revenue": info.get('totalRevenue'),
+                "net_income": info.get('netIncomeToCommon'),
+                "research_development": info.get('researchDevelopment'),
+                "capital_expenditure": info.get('capitalExpenditure') or (abs(stock.cashflow.loc['Capital Expenditure'].iloc[0]) if 'Capital Expenditure' in stock.cashflow.index else None)
             }
         except Exception as e:
             return {"error": str(e)}
@@ -214,6 +218,10 @@ def read_filing_content(path):
         print(f"Error parsing filing: {e}")
         return ""
 
+SYSTEM_PROMPT = """You are a friendly and clear investment educator. Your goal is to help common people new to investing understand stocks without using heavy financial jargon. 
+You provide insights into a company's performance, future relevance, and valuation based on data. 
+CRITICAL: You MUST NOT provide explicit 'BUY', 'SELL', or 'HOLD' recommendations. Instead, guide the user with information that helps them make their own decision."""
+
 class LLMService:
     def __init__(self, api_key=None, model_choice='mistral'):
         self.gemini_api_key = api_key or os.getenv("GEMINI_API_KEY")
@@ -222,7 +230,10 @@ class LLMService:
 
         if self.gemini_api_key:
             genai.configure(api_key=self.gemini_api_key)
-        self.gemini_model = genai.GenerativeModel('gemini-flash-latest')
+        self.gemini_model = genai.GenerativeModel(
+            'gemini-flash-latest',
+            system_instruction=SYSTEM_PROMPT
+        )
 
         if self.mistral_api_key:
             self.mistral_client = Mistral(api_key=self.mistral_api_key)
@@ -236,6 +247,65 @@ class LLMService:
     def get_chat_response(self, history, current_query, stream=False):
         # Legacy method
         pass
+
+    async def get_transcript_highlights(self, transcript_text):
+        prompt = f"""
+        You are a financial highlights expert.
+        Analyze the following earnings call transcript. Specifically find key "Transcript Highlights" that investors should keep in mind.
+        These are moments where:
+        - The company mentions major financial/strategic shifts (overspending, underspending, etc.).
+        - Executives or analysts raise important questions or points about the company's future.
+        - Important highlights that someone might otherwise miss in the text.
+        
+        CRITICAL: Each highlight MUST BE SUBSTANTIALLY LONG. Ensure the clip length (end - start) is at least 20 seconds to provide enough context for the listener. If the transcript portion is shorter, expand the start and end by a few seconds to capture the full context of the point being made.
+
+        The transcript contains timestamps in the format [start_s - end_s].
+        Return a JSON array of highlights. Each highlight should be an object with:
+        - start: The starting timestamp (number in seconds).
+        - end: The ending timestamp (number in seconds).
+        - label: A short, catchy title for the highlight (e.g., "Strategic R&D Expansion", "CapEx Context").
+        - description: A brief explanation of what is the key takeaway in this clip.
+
+        Example output:
+        [
+          {{"start": 12.5, "end": 45.2, "label": "R&D Spend Concern", "description": "CEO admitted to 20% increase in R&D with no product timeline."}}
+        ]
+        
+        Return ONLY the raw JSON array. No markdown, no wrappers.
+        
+        TRANSCRIPT:
+        {transcript_text[:100000]}  # Truncate to first 100k chars for safety
+        """
+        
+        if self.model_choice == 'mistral' and self.mistral_client:
+            try:
+                response = await self.mistral_client.chat.complete_async(
+                    model="mistral-large-latest",
+                    messages=[{"role": "user", "content": prompt}],
+                    response_format={"type": "json_object"} if hasattr(self.mistral_client, 'chat') else None
+                )
+                import json
+                text = response.choices[0].message.content.strip()
+                # If Mistral returns markdown
+                if text.startswith('```json'):
+                    text = text[7:-3].strip()
+                elif text.startswith('```'):
+                    text = text[3:-3].strip()
+                return json.loads(text)
+            except Exception as e:
+                print(f"Mistral Error: {e}")
+                return []
+        else:
+            try:
+                import json
+                response = await self.gemini_model.generate_content_async(
+                    prompt, 
+                    generation_config={"response_mime_type": "application/json"}
+                )
+                return json.loads(response.text)
+            except Exception as e:
+                print(f"Gemini Error: {e}")
+                return []
 
     async def get_analysis_v2(self, stock_symbol):
         from .models import Stock
@@ -258,19 +328,24 @@ class LLMService:
         filings_context = "\n\n".join([f"FILING CONTENT:\n{content}" for content in filings_data]) 
         
         prompt = f"""
-        You are an expert financial analyst. Analyze the stock {stock_symbol} based on the following SEC filings and DCF analysis.
+        You are a friendly and clear investment educator. Your goal is to help a person who is new to investing understand the stock {stock_symbol} based on the following SEC filings and DCF analysis.
         
-        DCF ANALYSIS RESULTS:
+        DCF ANALYSIS DATA:
         {dcf_data}
         
-        SEC FILINGS SUMMARY/DATA (TRUNCATED):
+        SEC FILINGS DATA (TRUNCATED):
         {filings_context}
         
-        Please provide a detailed analysis including:
-        1. Financial Performance Trends (from SEC).
-        2. Risks and Opportunities.
-        3. Valuation assessment based on the DCF result.
-        4. Final Recommendation (Buy/Hold/Sell) with justification.
+        Please provide a detailed analysis in plain, simple English that avoids heavy financial jargon. Your objective is not to tell them what to do, but to give them the insights to decide for themselves.
+        
+        Structure your response with these sections:
+        1. **Company Overview & Performance**: How is the company actually doing? Is it growing? Is it healthy? Explain this like you're talking to a friend.
+        2. **The Spending Story (Numbers Explained Simply)**: Look at how much they are spending in the background on things like Research & Development (R&D) and building/fixing things (CapEx). Use the actual numbers (e.g., billions or millions) but explain what they mean. Does this spending look like it will actually benefit the company and its investors in the long run, or does it feel like a "black hole"?
+        3. **Future Relevance & Direction**: Is the direction the company is taking good for its future? Will it still be relevant in 5-10 years? What are the big things they are working on?
+        4. **The 'Fair Value' Insight**: Explain what the DCF analysis says about the stock's value (intrinsic value: {dcf_data.get('intrinsic_value') if isinstance(dcf_data, dict) else 'N/A'}) compared to its current price. Explain what this means for an investor in simple terms.
+        5. **Key Risks & Green Flags**: What should an investor watch out for (Risks), and what are the encouraging signs (Green Flags)?
+        
+        CRITICAL: Use the numbers provided in the DCF DATA (Revenue, Net Income, R&D, etc.) to ground your analysis, but always translate them into "human" terms (e.g., "They spend $X out of every $100 they make on Y"). DO NOT provide a final 'BUY', 'SELL', or 'HOLD' recommendation. Instead, provide a concluding section called 'Investor's Decision Toolkit' where you summarize the most important points.
         
         Output format should be clean Markdown.
         """
@@ -279,7 +354,10 @@ class LLMService:
             try:
                 response = await self.mistral_client.chat.complete_async(
                     model="mistral-medium-latest",
-                    messages=[{"role": "user", "content": prompt}]
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ]
                 )
                 text = response.choices[0].message.content.strip()
                 if text.startswith('```markdown'):
@@ -300,7 +378,9 @@ class LLMService:
 
     async def get_chat_response_v2(self, history, current_query):
         if self.model_choice == 'mistral' and self.mistral_client:
-            messages = [{"role": h['role'], "content": h['content']} for h in history]
+            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+            for h in history:
+                messages.append({"role": h['role'], "content": h['content']})
             messages.append({"role": "user", "content": current_query})
             try:
                 response = await self.mistral_client.chat.complete_async(

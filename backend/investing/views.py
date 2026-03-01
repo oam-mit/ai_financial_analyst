@@ -9,6 +9,7 @@ from .models import Stock, SECFiling, ChatSession, ChatMessage
 from .serializers import StockSerializer, SECFilingSerializer, ChatSessionSerializer, ChatMessageSerializer, UserSerializer
 from .services import SECService, DCFService, LLMService, read_filing_content
 from django.http import HttpResponse, StreamingHttpResponse
+from django.conf import settings
 import os
 import requests
 
@@ -112,6 +113,54 @@ class StockViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
+    @action(detail=True, methods=['get'])
+    def audio_clip(self, request, symbol=None):
+        start = float(request.query_params.get('start', 0))
+        end = float(request.query_params.get('end', 10))
+        
+        # Search for the audio file in possible locations
+        possible_paths = [
+            os.path.join(settings.BASE_DIR, "audio_files", symbol.upper(), "testing_call.mp3"),
+            os.path.join(settings.BASE_DIR, "testing_call.mp3"),
+        ]
+        
+        audio_path = None
+        for path in possible_paths:
+            if os.path.exists(path):
+                audio_path = path
+                break
+                
+        if not audio_path:
+            return Response({"error": f"Audio file not found for {symbol}"}, status=status.HTTP_404_NOT_FOUND)
+        
+        try:
+            from pydub import AudioSegment
+            import io
+            
+            # This requires ffmpeg on the system
+            audio = AudioSegment.from_mp3(audio_path)
+            clip = audio[int(start * 1000):int(end * 1000)]
+            
+            buffer = io.BytesIO()
+            clip.export(buffer, format="mp3")
+            buffer.seek(0)
+            
+            response = HttpResponse(buffer.read(), content_type="audio/mp3")
+            response['Content-Disposition'] = f'inline; filename="clip_{symbol}_{start}_{end}.mp3"'
+            return response
+        except Exception as e:
+            # FALLBACK: Stream the entire file if ffmpeg is missing
+            # The frontend can use start/end to control playback.
+            # This is a robust fallback so the UI still works.
+            try:
+                with open(audio_path, 'rb') as f:
+                    response = HttpResponse(f.read(), content_type="audio/mp3")
+                    response['Content-Disposition'] = f'inline; filename="full_{symbol}.mp3"'
+                    response['X-Is-Full-Audio'] = 'true' # Inform frontend it needs to handle slicing
+                    return response
+            except Exception as read_err:
+                return Response({"error": f"Audio access failed: {str(read_err)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
 from django.http import StreamingHttpResponse
 
 class ChatSessionViewSet(viewsets.ModelViewSet):
@@ -146,24 +195,34 @@ class ChatSessionViewSet(viewsets.ModelViewSet):
     def analyze(self, request, pk=None):
         session = self.get_object()
         stock = session.stock
-        
         model_choice = request.data.get('model_choice', 'mistral')
         llm_service = LLMService(model_choice=model_choice)
         
         async def process_analysis():
+            # 1. Main analysis
             full_text = await llm_service.get_analysis_v2(stock.symbol)
+            
+            # 2. Get highlights from transcript (fetch from DB)
+            highlights = []
+            if stock.transcript:
+                try:
+                    highlights = await llm_service.get_transcript_highlights(stock.transcript)
+                except Exception as e:
+                    print(f"Error processing transcript: {e}")
+
             # Save as message after complete
             await sync_to_async(ChatMessage.objects.create)(
                 session=session,
                 role='assistant',
                 content=full_text,
-                is_analysis=True
+                is_analysis=True,
+                highlights=highlights
             )
-            return full_text
+            return {"content": full_text, "highlights": highlights}
 
         try:
-            full_text = async_to_sync(process_analysis)()
-            return Response({"content": full_text}, status=status.HTTP_200_OK)
+            result = async_to_sync(process_analysis)()
+            return Response(result, status=status.HTTP_200_OK)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
